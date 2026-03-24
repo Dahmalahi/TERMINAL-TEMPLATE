@@ -4,29 +4,35 @@ import java.util.*;
 
 /**
  * InstallWizard v1.1.1 - First-run install wizard for DashCMD.
- * Shown when the app has never been installed on this device.
+ * Auto-detects JSR-75 storage roots with free space display.
  *
  * Sequence:
- *  1. Boot splash (animated progress)
- *  2. Welcome screen
- *  3. Storage selection (RMS only in MIDP 2.0)
- *  4. Username + password setup
- *  5. Install progress (copying /Terminal/ structure)
- *  6. Done -> launch terminal
+ *  0. Boot splash (animated progress + storage detection)
+ *  1. Welcome screen + Storage selection (with free space)
+ *  2. Username + password setup
+ *  3. Install progress (creating /Terminal/ structure)
+ *  4. Done -> launch terminal
  */
 public class InstallWizard extends Canvas implements CommandListener {
 
     private TerminalMIDlet midlet;
-    private int            step;        // 0=splash, 1=welcome, 2=user, 3=install, 4=done
-    private int            progress;    // 0-100
+    private int            step;
+    private int            progress;
     private String         statusMsg;
-    private String         logMsg;
     private boolean        installing;
 
-    // User setup inputs
+    // User setup
     private String         setupUser = "user";
     private String         setupPass = "1234";
-    private int            selectedStorage = 0; // 0=RMS
+    private int            selectedStorage = 0;
+
+    // JSR-75 detection
+    private String[]       storageRoots;
+    private long[]         storageFree;
+    private boolean        jsr75Available;
+    private boolean        detectionDone;
+    private int            recommendedRoot;
+    private String         detectionStatus;
 
     // Colours
     private static final int BG      = 0x0D1117;
@@ -36,11 +42,12 @@ public class InstallWizard extends Canvas implements CommandListener {
     private static final int GREY    = 0x888888;
     private static final int RED     = 0xFF4444;
     private static final int YELLOW  = 0xFFFF00;
+    private static final int DGREEN  = 0x1A3A1A;
 
     private Font fontS, fontM;
     private int  W, H;
 
-    // Install log lines shown during install
+    // Install log
     private Vector installLog;
 
     // Commands
@@ -48,69 +55,180 @@ public class InstallWizard extends Canvas implements CommandListener {
     private Command backCmd;
     private Command inputCmd;
 
-    // Timer for splash animation
+    // Animation
     private Thread animThread;
     private volatile boolean animRunning;
 
     public InstallWizard(TerminalMIDlet midlet) {
-        this.midlet     = midlet;
-        this.step       = 0;
-        this.progress   = 0;
-        this.statusMsg  = "Initializing...";
-        this.logMsg     = "";
-        this.installing = false;
-        this.installLog = new Vector();
+        this.midlet        = midlet;
+        this.step          = 0;
+        this.progress      = 0;
+        this.statusMsg     = "Initializing...";
+        this.installing    = false;
+        this.installLog    = new Vector();
+        this.detectionDone = false;
+        this.detectionStatus = "";
+        this.recommendedRoot = -1;
+        this.storageRoots  = new String[0];
+        this.storageFree   = new long[0];
 
         fontS = Font.getFont(Font.FACE_MONOSPACE, Font.STYLE_PLAIN, Font.SIZE_SMALL);
         fontM = Font.getFont(Font.FACE_MONOSPACE, Font.STYLE_BOLD,  Font.SIZE_MEDIUM);
 
-        nextCmd  = new Command("Next",   Command.OK,     1);
-        backCmd  = new Command("Back",   Command.BACK,   2);
-        inputCmd = new Command("Input",  Command.SCREEN, 3);
+        nextCmd  = new Command("Next",  Command.OK,     1);
+        backCmd  = new Command("Back",  Command.BACK,   2);
+        inputCmd = new Command("Input", Command.SCREEN, 3);
 
         addCommand(nextCmd);
-        addCommand(inputCmd);
         setCommandListener(this);
 
-        // Start splash animation
         startSplash();
     }
 
+    // ==================== SPLASH + DETECTION ====================
+
     private void startSplash() {
-        step       = 0;
-        progress   = 0;
-        statusMsg  = "Booting DashCMD v1.1.1...";
+        step        = 0;
+        progress    = 0;
+        statusMsg   = "Booting DashCMD v1.1.1...";
         animRunning = true;
-        animThread  = new Thread(new Runnable() {
+
+        animThread = new Thread(new Runnable() {
             public void run() {
+                // Phase 1: Boot messages
                 String[] msgs = {
                     "Loading kernel...",
                     "Mounting filesystems...",
                     "Starting services...",
-                    "Checking RMS storage...",
-                    "Loading DashCMD v1.1.1...",
-                    "Ready."
+                    "Initializing display..."
                 };
                 for (int i = 0; i < msgs.length && animRunning; i++) {
                     statusMsg = msgs[i];
-                    AppStorage.logBoot("INFO", msgs[i]);
-                    int target = (i + 1) * 16;
-                    while (progress < target && animRunning) {
-                        progress++;
-                        repaint();
-                        try { Thread.sleep(30); } catch (InterruptedException e) { return; }
-                    }
+                    logBoot("INFO", msgs[i]);
+                    int target = (i + 1) * 10;
+                    animateTo(target, 25);
                 }
-                // Pause then advance to welcome
-                try { Thread.sleep(400); } catch (InterruptedException e) {}
+
+                // Phase 2: JSR-75 detection
+                statusMsg = "Detecting storage...";
+                logBoot("INFO", "Starting storage detection");
+                repaint();
+                animateTo(45, 20);
+
+                detectStorage();
+
+                // Phase 3: Post-detection
+                statusMsg = "Checking RMS storage...";
+                logBoot("INFO", "RMS storage available");
+                animateTo(70, 25);
+
+                if (jsr75Available && storageRoots.length > 0) {
+                    statusMsg = "Found " + storageRoots.length + " storage root(s)";
+                    logBoot("INFO", statusMsg);
+                } else if (jsr75Available) {
+                    statusMsg = "JSR-75 OK, no external roots";
+                    logBoot("WARN", statusMsg);
+                } else {
+                    statusMsg = "JSR-75 not available, using RMS";
+                    logBoot("INFO", statusMsg);
+                }
+                animateTo(85, 25);
+
+                statusMsg = "Loading DashCMD v1.1.1...";
+                logBoot("INFO", statusMsg);
+                animateTo(95, 20);
+
+                statusMsg = "Ready.";
+                logBoot("INFO", "Boot complete");
+                animateTo(100, 20);
+
+                pause(400);
+
                 if (animRunning) {
                     step = 1;
+                    updateCommands();
                     repaint();
                 }
             }
         });
         animThread.start();
     }
+
+    /** Detect JSR-75 storage roots and free space */
+    private void detectStorage() {
+        // Check JSR-75 availability
+        statusMsg = "Checking JSR-75 API...";
+        repaint();
+        jsr75Available = JSR75Storage.isAvailable();
+        logBoot("INFO", "JSR-75: " + (jsr75Available ? "available" : "not available"));
+
+        if (!jsr75Available) {
+            storageRoots = new String[0];
+            storageFree  = new long[0];
+            detectionDone = true;
+            return;
+        }
+
+        // Detect roots
+        statusMsg = "Scanning storage roots...";
+        repaint();
+
+        storageRoots = JSR75Storage.listRoots();
+        storageFree  = new long[storageRoots.length];
+
+        // Get free space for each root
+        long bestSpace = -1;
+        recommendedRoot = -1;
+
+        for (int i = 0; i < storageRoots.length && animRunning; i++) {
+            String name = formatRoot(storageRoots[i]);
+            statusMsg = "Probing " + name + "...";
+            detectionStatus = "Checking " + (i + 1) + "/" + storageRoots.length;
+            repaint();
+
+            storageFree[i] = JSR75Storage.getAvailableSpace(storageRoots[i]);
+            logBoot("INFO", "Root: " + name +
+                    " (" + formatSize(storageFree[i]) + " free)");
+
+            // Track best (most free space, prefer external)
+            boolean isExternal = isExternalStorage(storageRoots[i]);
+            if (storageFree[i] > bestSpace ||
+                (isExternal && storageFree[i] > 0 && recommendedRoot < 0)) {
+                bestSpace = storageFree[i];
+                recommendedRoot = i;
+            }
+
+            // Animate progress during detection
+            int detProgress = 45 + ((i + 1) * 20) / Math.max(1, storageRoots.length);
+            progress = Math.min(detProgress, 65);
+            repaint();
+            pause(100);
+        }
+
+        detectionDone = true;
+        detectionStatus = storageRoots.length + " root(s) detected";
+
+        if (recommendedRoot >= 0) {
+            logBoot("INFO", "Recommended: " + formatRoot(storageRoots[recommendedRoot]));
+            // Auto-select recommended if JSR-75 available
+            selectedStorage = recommendedRoot + 1;
+        }
+    }
+
+    /** Check if a root looks like external storage */
+    private boolean isExternalStorage(String root) {
+        String lower = root.toLowerCase();
+        return lower.indexOf("sdcard") >= 0 ||
+               lower.indexOf("sd card") >= 0 ||
+               lower.indexOf("memorycard") >= 0 ||
+               lower.indexOf("memory card") >= 0 ||
+               lower.indexOf("mmc") >= 0 ||
+               lower.indexOf("/e:/") >= 0 ||
+               lower.indexOf("/d:/") >= 0 ||
+               lower.indexOf("external") >= 0;
+    }
+
+    // ==================== PAINT ====================
 
     protected void paint(Graphics g) {
         W = getWidth();
@@ -127,46 +245,45 @@ public class InstallWizard extends Canvas implements CommandListener {
         }
     }
 
-    // ---- Step 0: Boot splash ----
     private void paintSplash(Graphics g) {
-        // Draw pixel-art D A S H C M D banner
         int px = Math.max(1, (W - 8) / 38);
         int bw = 7 * (4 * px + px);
         int bx = (W - bw) / 2;
         int by = H / 5;
         drawPixelBanner(g, bx, by, px, GREEN);
 
-        // Version
         g.setFont(fontS);
         g.setColor(CYAN);
         String ver = "v1.1.1";
-        g.drawString(ver, (W - fontS.stringWidth(ver)) / 2, by + 5 * px + px * 2 + 4,
-                     Graphics.TOP | Graphics.LEFT);
+        g.drawString(ver, (W - fontS.stringWidth(ver)) / 2,
+                     by + 5 * px + px * 2 + 4, Graphics.TOP | Graphics.LEFT);
 
-        // Status message
+        // Status
+        int sy = H / 2;
         g.setColor(GREY);
-        g.setFont(fontS);
-        g.drawString(statusMsg, 4, H / 2, Graphics.TOP | Graphics.LEFT);
+        g.drawString(statusMsg, 4, sy, Graphics.TOP | Graphics.LEFT);
+
+        // Detection status
+        if (detectionStatus.length() > 0) {
+            g.setColor(CYAN);
+            g.drawString(detectionStatus, 4, sy + fontS.getHeight() + 1,
+                         Graphics.TOP | Graphics.LEFT);
+        }
 
         // Progress bar
-        int barY = H / 2 + fontS.getHeight() + 6;
-        int barW = W - 8;
-        g.setColor(0x1A3A1A);
-        g.fillRect(4, barY, barW, 8);
-        g.setColor(GREEN);
-        g.fillRect(4, barY, barW * progress / 100, 8);
-        g.setColor(GREY);
-        g.drawRect(4, barY, barW, 8);
+        int barY = H / 2 + fontS.getHeight() * 2 + 8;
+        drawProgressBar(g, 4, barY, W - 8, 8, progress);
 
-        // Progress %
         g.setColor(WHITE);
         String pct = progress + "%";
-        g.drawString(pct, (W - fontS.stringWidth(pct)) / 2, barY + 12, Graphics.TOP | Graphics.LEFT);
+        g.drawString(pct, (W - fontS.stringWidth(pct)) / 2,
+                     barY + 12, Graphics.TOP | Graphics.LEFT);
     }
 
-    // ---- Step 1: Welcome / Storage selection ----
     private void paintWelcome(Graphics g) {
         int y = 4;
+
+        // Header
         g.setFont(fontM);
         g.setColor(GREEN);
         g.drawString("DashCMD v1.1.1", 4, y, Graphics.TOP | Graphics.LEFT);
@@ -174,130 +291,331 @@ public class InstallWizard extends Canvas implements CommandListener {
 
         g.setFont(fontS);
         g.setColor(CYAN);
-        g.drawString("First time setup", 4, y, Graphics.TOP | Graphics.LEFT);
+        g.drawString("Choose install location", 4, y, Graphics.TOP | Graphics.LEFT);
         y += fontS.getHeight() + 6;
 
+        // Divider
+        g.setColor(0x333333);
+        g.drawLine(4, y, W - 4, y);
+        y += 4;
+
+        // Option 0: RMS (always available)
         g.setColor(WHITE);
-        g.drawString("Storage location:", 4, y, Graphics.TOP | Graphics.LEFT);
+        g.drawString("Storage options:", 4, y, Graphics.TOP | Graphics.LEFT);
+        y += fontS.getHeight() + 3;
+
+        boolean isSelected = (selectedStorage == 0);
+        g.setColor(isSelected ? GREEN : GREY);
+        String rmsLabel = (isSelected ? "> " : "  ") + "[RMS] Device memory";
+        g.drawString(rmsLabel, 4, y, Graphics.TOP | Graphics.LEFT);
+        y += fontS.getHeight() + 1;
+
+        if (isSelected) {
+            g.setColor(0x666666);
+            g.drawString("    Always available, limited size", 4, y,
+                         Graphics.TOP | Graphics.LEFT);
+        }
         y += fontS.getHeight() + 2;
 
-        // Storage options
-        String[] opts = {"[RMS] Device memory (recommended)", "[FC]  FileConnection (if supported)"};
-        for (int i = 0; i < opts.length; i++) {
-            if (i == selectedStorage) {
-                g.setColor(GREEN);
-                g.drawString("> " + opts[i], 4, y, Graphics.TOP | Graphics.LEFT);
-            } else {
-                g.setColor(GREY);
-                g.drawString("  " + opts[i], 4, y, Graphics.TOP | Graphics.LEFT);
+        // JSR-75 roots
+        for (int i = 0; i < storageRoots.length; i++) {
+            isSelected = (selectedStorage == i + 1);
+            boolean isRecommended = (i == recommendedRoot);
+
+            String name = formatRoot(storageRoots[i]);
+            String space = formatSize(storageFree[i]);
+
+            // Root name with indicator
+            g.setColor(isSelected ? GREEN : GREY);
+            String prefix = isSelected ? "> " : "  ";
+            String label = prefix + "[FC] " + name;
+            g.drawString(label, 4, y, Graphics.TOP | Graphics.LEFT);
+
+            // Free space on same line if room
+            String spaceLabel = "(" + space + ")";
+            int spaceX = W - fontS.stringWidth(spaceLabel) - 4;
+            if (spaceX > fontS.stringWidth(label) + 8) {
+                g.setColor(isSelected ? CYAN : 0x666666);
+                g.drawString(spaceLabel, spaceX, y, Graphics.TOP | Graphics.LEFT);
             }
-            y += fontS.getHeight() + 2;
+            y += fontS.getHeight() + 1;
+
+            // Recommended tag
+            if (isRecommended) {
+                g.setColor(YELLOW);
+                g.drawString("    * Recommended", 4, y,
+                             Graphics.TOP | Graphics.LEFT);
+                y += fontS.getHeight() + 1;
+            }
+
+            y += 1;
         }
 
-        y += 6;
-        g.setColor(GREY);
-        g.drawString("Installing to /Terminal/", 4, y, Graphics.TOP | Graphics.LEFT);
+        // Divider
+        y += 2;
+        g.setColor(0x333333);
+        g.drawLine(4, y, W - 4, y);
+        y += 4;
+
+        // JSR-75 status
+        if (jsr75Available) {
+            g.setColor(GREEN);
+            g.drawString("JSR-75: Available", 4, y, Graphics.TOP | Graphics.LEFT);
+            y += fontS.getHeight();
+            g.setColor(CYAN);
+            g.drawString(storageRoots.length + " storage root(s) found", 4, y,
+                         Graphics.TOP | Graphics.LEFT);
+        } else {
+            g.setColor(YELLOW);
+            g.drawString("JSR-75: Not available", 4, y,
+                         Graphics.TOP | Graphics.LEFT);
+            y += fontS.getHeight();
+            g.setColor(GREY);
+            g.drawString("Only RMS storage available", 4, y,
+                         Graphics.TOP | Graphics.LEFT);
+        }
+        y += fontS.getHeight() + 4;
+
+        // Install path preview
+        g.setColor(WHITE);
+        g.drawString("Install path:", 4, y, Graphics.TOP | Graphics.LEFT);
         y += fontS.getHeight();
-        g.drawString("Press Next to continue", 4, y, Graphics.TOP | Graphics.LEFT);
+        g.setColor(CYAN);
+        String path = getInstallPathPreview();
+        if (fontS.stringWidth(path) > W - 8) {
+            path = "..." + path.substring(path.length() - 25);
+        }
+        g.drawString("  " + path, 4, y, Graphics.TOP | Graphics.LEFT);
 
         // Bottom hint
         g.setColor(CYAN);
-        g.drawString("Up/Dn=select  Next=confirm", 4, H - fontS.getHeight() - 2,
-                     Graphics.TOP | Graphics.LEFT);
+        g.drawString("Up/Dn=select  Next=continue", 4,
+                     H - fontS.getHeight() - 2, Graphics.TOP | Graphics.LEFT);
     }
 
-    // ---- Step 2: User setup ----
     private void paintSetup(Graphics g) {
         int y = 4;
+
         g.setFont(fontM);
         g.setColor(GREEN);
         g.drawString("Create account", 4, y, Graphics.TOP | Graphics.LEFT);
         y += fontM.getHeight() + 4;
 
         g.setFont(fontS);
+
+        // Username
+        g.setColor(GREY);
+        g.drawString("Username:", 4, y, Graphics.TOP | Graphics.LEFT);
+        y += fontS.getHeight();
         g.setColor(WHITE);
-        g.drawString("Username: " + setupUser, 4, y, Graphics.TOP | Graphics.LEFT);
-        y += fontS.getHeight() + 2;
-        g.drawString("Password: " + maskPass(setupPass), 4, y, Graphics.TOP | Graphics.LEFT);
+        g.drawString("  " + setupUser, 4, y, Graphics.TOP | Graphics.LEFT);
+        y += fontS.getHeight() + 4;
+
+        // Password
+        g.setColor(GREY);
+        g.drawString("Password:", 4, y, Graphics.TOP | Graphics.LEFT);
+        y += fontS.getHeight();
+        g.setColor(WHITE);
+        g.drawString("  " + maskPass(setupPass), 4, y, Graphics.TOP | Graphics.LEFT);
         y += fontS.getHeight() + 8;
 
-        g.setColor(GREY);
-        g.drawString("Press 'Input' to change.", 4, y, Graphics.TOP | Graphics.LEFT);
+        // Default hint
+        g.setColor(0x666666);
+        g.drawString("Press 'Input' to change values.", 4, y,
+                     Graphics.TOP | Graphics.LEFT);
         y += fontS.getHeight() + 2;
         g.drawString("Default: user / 1234", 4, y, Graphics.TOP | Graphics.LEFT);
         y += fontS.getHeight() + 8;
 
+        // Root account info
+        g.setColor(0x333333);
+        g.drawLine(4, y, W - 4, y);
+        y += 4;
         g.setColor(YELLOW);
-        g.drawString("root password: toor", 4, y, Graphics.TOP | Graphics.LEFT);
+        g.drawString("Root account:", 4, y, Graphics.TOP | Graphics.LEFT);
+        y += fontS.getHeight();
+        g.drawString("  root / toor", 4, y, Graphics.TOP | Graphics.LEFT);
         y += fontS.getHeight() + 2;
         g.setColor(GREY);
-        g.drawString("(change with passwd after)", 4, y, Graphics.TOP | Graphics.LEFT);
-
-        g.setColor(CYAN);
-        g.drawString("Next=install  Input=change", 4, H - fontS.getHeight() - 2,
+        g.drawString("  (change with passwd later)", 4, y,
                      Graphics.TOP | Graphics.LEFT);
+        y += fontS.getHeight() + 8;
+
+        // Storage summary
+        g.setColor(0x333333);
+        g.drawLine(4, y, W - 4, y);
+        y += 4;
+        g.setColor(CYAN);
+        g.drawString("Storage: " + getStorageLabel(), 4, y,
+                     Graphics.TOP | Graphics.LEFT);
+        y += fontS.getHeight();
+        g.setColor(GREY);
+        String path = getInstallPathPreview();
+        if (fontS.stringWidth("Path: " + path) > W - 8) {
+            path = "..." + path.substring(path.length() - 20);
+        }
+        g.drawString("Path: " + path, 4, y, Graphics.TOP | Graphics.LEFT);
+
+        // Bottom
+        g.setColor(CYAN);
+        g.drawString("Next=install  Back=storage", 4,
+                     H - fontS.getHeight() * 2 - 2, Graphics.TOP | Graphics.LEFT);
+        g.drawString("Input=change user/pass", 4,
+                     H - fontS.getHeight() - 2, Graphics.TOP | Graphics.LEFT);
     }
 
-    // ---- Step 3: Install progress ----
     private void paintInstall(Graphics g) {
         int y = 4;
+
         g.setFont(fontM);
         g.setColor(GREEN);
         g.drawString("Installing...", 4, y, Graphics.TOP | Graphics.LEFT);
-        y += fontM.getHeight() + 4;
+        y += fontM.getHeight() + 2;
+
+        // Storage type indicator
+        g.setFont(fontS);
+        g.setColor(CYAN);
+        g.drawString(getStorageLabel(), 4, y, Graphics.TOP | Graphics.LEFT);
+        y += fontS.getHeight() + 4;
 
         // Progress bar
-        int barW = W - 8;
-        g.setColor(0x1A3A1A);
-        g.fillRect(4, y, barW, 10);
-        g.setColor(GREEN);
-        g.fillRect(4, y, barW * progress / 100, 10);
-        g.setColor(GREY);
-        g.drawRect(4, y, barW, 10);
+        drawProgressBar(g, 4, y, W - 8, 10, progress);
         y += 14;
 
-        g.setFont(fontS);
+        // Status line
         g.setColor(WHITE);
         g.drawString(progress + "%  " + statusMsg, 4, y, Graphics.TOP | Graphics.LEFT);
         y += fontS.getHeight() + 6;
 
-        // Install log
-        g.setColor(GREEN);
-        int logLines = Math.min(installLog.size(), (H - y - 20) / fontS.getHeight());
+        // Log lines with color coding
+        int maxLines = (H - y - 4) / fontS.getHeight();
+        int logLines = Math.min(installLog.size(), maxLines);
         int logStart = Math.max(0, installLog.size() - logLines);
+
         for (int i = logStart; i < installLog.size(); i++) {
-            g.drawString((String) installLog.elementAt(i), 4, y, Graphics.TOP | Graphics.LEFT);
+            String line = (String) installLog.elementAt(i);
+
+            if (line.indexOf("FAIL") >= 0 || line.indexOf("ERROR") >= 0) {
+                g.setColor(RED);
+            } else if (line.indexOf("OK") >= 0) {
+                g.setColor(GREEN);
+            } else if (line.indexOf("INFO") >= 0) {
+                g.setColor(CYAN);
+            } else if (line.indexOf("WARN") >= 0) {
+                g.setColor(YELLOW);
+            } else {
+                g.setColor(GREY);
+            }
+
+            // Truncate long lines
+            if (fontS.stringWidth(line) > W - 8) {
+                while (fontS.stringWidth(line + "..") > W - 8 && line.length() > 5) {
+                    line = line.substring(0, line.length() - 1);
+                }
+                line = line + "..";
+            }
+
+            g.drawString(line, 4, y, Graphics.TOP | Graphics.LEFT);
             y += fontS.getHeight();
         }
     }
 
-    // ---- Step 4: Done ----
     private void paintDone(Graphics g) {
-        int y = H / 4;
+        int y = 8;
+
+        // Success header
         g.setFont(fontM);
         g.setColor(GREEN);
         String done = "Install Complete!";
-        g.drawString(done, (W - fontM.stringWidth(done)) / 2, y, Graphics.TOP | Graphics.LEFT);
+        g.drawString(done, (W - fontM.stringWidth(done)) / 2, y,
+                     Graphics.TOP | Graphics.LEFT);
+        y += fontM.getHeight() + 4;
+
+        // Checkmark
+        g.setColor(GREEN);
+        String check = "[OK]";
+        g.drawString(check, (W - fontM.stringWidth(check)) / 2, y,
+                     Graphics.TOP | Graphics.LEFT);
         y += fontM.getHeight() + 8;
 
         g.setFont(fontS);
-        g.setColor(WHITE);
-        String[] lines = {
-            "DashCMD v1.1.1 installed.",
-            "User: " + setupUser,
-            "Home: /home/" + setupUser,
-            "",
-            "Login: " + setupUser + " / " + setupPass,
-            "Root:  root / toor",
-            "",
-            "Press Next to launch."
+
+        // Divider
+        g.setColor(0x333333);
+        g.drawLine(4, y, W - 4, y);
+        y += 6;
+
+        // Install details
+        String[][] info = {
+            {"Version:",  "DashCMD v1.1.1"},
+            {"User:",     setupUser},
+            {"Home:",     "/home/" + setupUser},
+            {"Storage:",  getStorageLabel()},
+            {"Path:",     getInstallPathPreview()},
+            {"",          ""},
+            {"Login:",    setupUser + " / " + setupPass},
+            {"Root:",     "root / toor"},
         };
-        for (int i = 0; i < lines.length; i++) {
-            int color = lines[i].startsWith("Login") || lines[i].startsWith("Root") ? YELLOW : WHITE;
-            g.setColor(color);
-            g.drawString(lines[i], 8, y, Graphics.TOP | Graphics.LEFT);
-            y += fontS.getHeight() + 1;
+
+        for (int i = 0; i < info.length; i++) {
+            if (info[i][0].length() == 0) {
+                y += 4;
+                continue;
+            }
+
+            // Label
+            g.setColor(GREY);
+            g.drawString(info[i][0], 8, y, Graphics.TOP | Graphics.LEFT);
+
+            // Value with color
+            int valX = 8 + fontS.stringWidth(info[i][0]) + 4;
+            if (info[i][0].equals("Login:") || info[i][0].equals("Root:")) {
+                g.setColor(YELLOW);
+            } else if (info[i][0].equals("Storage:") || info[i][0].equals("Path:")) {
+                g.setColor(CYAN);
+            } else {
+                g.setColor(WHITE);
+            }
+
+            String val = info[i][1];
+            int maxW = W - valX - 4;
+            if (fontS.stringWidth(val) > maxW) {
+                val = "..." + val.substring(val.length() - 18);
+            }
+            g.drawString(val, valX, y, Graphics.TOP | Graphics.LEFT);
+            y += fontS.getHeight() + 2;
         }
+
+        // Divider
+        y += 4;
+        g.setColor(0x333333);
+        g.drawLine(4, y, W - 4, y);
+        y += 6;
+
+        // Launch prompt
+        g.setColor(GREEN);
+        String launch = "Press Next to launch terminal";
+        g.drawString(launch, (W - fontS.stringWidth(launch)) / 2, y,
+                     Graphics.TOP | Graphics.LEFT);
+    }
+
+    // ==================== PROGRESS BAR ====================
+
+    private void drawProgressBar(Graphics g, int x, int y, int w, int h, int pct) {
+        // Background
+        g.setColor(DGREEN);
+        g.fillRect(x, y, w, h);
+
+        // Fill
+        g.setColor(GREEN);
+        int fillW = (w * pct) / 100;
+        if (fillW > 0) {
+            g.fillRect(x, y, fillW, h);
+        }
+
+        // Border
+        g.setColor(GREY);
+        g.drawRect(x, y, w, h);
     }
 
     // ==================== KEY HANDLING ====================
@@ -307,9 +625,16 @@ public class InstallWizard extends Canvas implements CommandListener {
         try { ga = getGameAction(keyCode); } catch (Exception e) {}
 
         if (step == 1) {
-            if (ga == UP)   selectedStorage = 0;
-            if (ga == DOWN) selectedStorage = 1;
-            repaint();
+            int maxOpt = storageRoots.length;
+            if (ga == UP) {
+                selectedStorage--;
+                if (selectedStorage < 0) selectedStorage = maxOpt;
+                repaint();
+            } else if (ga == DOWN) {
+                selectedStorage++;
+                if (selectedStorage > maxOpt) selectedStorage = 0;
+                repaint();
+            }
         }
     }
 
@@ -319,26 +644,108 @@ public class InstallWizard extends Canvas implements CommandListener {
         } else if (c == nextCmd || c.getCommandType() == Command.OK) {
             advance();
         } else if (c == backCmd) {
-            if (step > 1) { step--; repaint(); }
+            goBack();
         }
     }
 
     private void advance() {
-        if (step == 0) { step = 1; repaint(); }
-        else if (step == 1) { step = 2; repaint(); }
-        else if (step == 2) { step = 3; startInstall(); }
-        else if (step == 4) { midlet.finishInstall(setupUser, setupPass); }
+        switch (step) {
+            case 0:
+                animRunning = false;
+                step = 1;
+                updateCommands();
+                repaint();
+                break;
+            case 1:
+                step = 2;
+                updateCommands();
+                repaint();
+                break;
+            case 2:
+                // Validate inputs
+                if (setupUser.length() == 0) {
+                    setupUser = "user";
+                }
+                if (setupPass.length() < 4) {
+                    setupPass = "1234";
+                }
+                step = 3;
+                updateCommands();
+                startInstall();
+                break;
+            case 4:
+                midlet.finishInstall(setupUser, setupPass);
+                break;
+        }
+    }
+
+    private void goBack() {
+        if (step == 2) {
+            step = 1;
+            updateCommands();
+            repaint();
+        } else if (step == 4) {
+            // Allow going back to see settings
+            step = 2;
+            updateCommands();
+            repaint();
+        }
+    }
+
+    /** Update visible commands based on current step */
+    private void updateCommands() {
+        removeCommand(nextCmd);
+        removeCommand(backCmd);
+        removeCommand(inputCmd);
+
+        switch (step) {
+            case 0:
+                addCommand(nextCmd); // Skip splash
+                break;
+            case 1:
+                addCommand(nextCmd);
+                break;
+            case 2:
+                addCommand(nextCmd);
+                addCommand(backCmd);
+                addCommand(inputCmd);
+                break;
+            case 3:
+                // No commands during install
+                break;
+            case 4:
+                addCommand(nextCmd);
+                break;
+        }
     }
 
     private void openInputDialog() {
         if (step != 2) return;
+
         TextBox tb = new TextBox("Username", setupUser, 32, TextField.ANY);
         Command ok = new Command("OK", Command.OK, 1);
         tb.addCommand(ok);
         tb.setCommandListener(new CommandListener() {
             public void commandAction(Command c, Displayable d) {
-                String s = ((TextBox)d).getString();
-                if (s != null && s.length() > 0) setupUser = s.trim();
+                String s = ((TextBox) d).getString();
+                if (s != null && s.trim().length() > 0) {
+                    setupUser = s.trim().toLowerCase();
+                    // Remove spaces and special chars
+                    StringBuffer clean = new StringBuffer();
+                    for (int i = 0; i < setupUser.length(); i++) {
+                        char ch = setupUser.charAt(i);
+                        if ((ch >= 'a' && ch <= 'z') ||
+                            (ch >= '0' && ch <= '9') ||
+                            ch == '_' || ch == '-') {
+                            clean.append(ch);
+                        }
+                    }
+                    if (clean.length() > 0) {
+                        setupUser = clean.toString();
+                    } else {
+                        setupUser = "user";
+                    }
+                }
                 midlet.getDisplay().setCurrent(InstallWizard.this);
                 openPasswordDialog();
             }
@@ -347,13 +754,18 @@ public class InstallWizard extends Canvas implements CommandListener {
     }
 
     private void openPasswordDialog() {
-        TextBox tb = new TextBox("Password", setupPass, 32, TextField.PASSWORD);
+        TextBox tb = new TextBox("Password (min 4 chars)", setupPass, 32,
+                                 TextField.PASSWORD);
         Command ok = new Command("OK", Command.OK, 1);
         tb.addCommand(ok);
         tb.setCommandListener(new CommandListener() {
             public void commandAction(Command c, Displayable d) {
-                String s = ((TextBox)d).getString();
-                if (s != null && s.length() >= 4) setupPass = s;
+                String s = ((TextBox) d).getString();
+                if (s != null && s.length() >= 4) {
+                    setupPass = s;
+                } else if (s != null && s.length() > 0) {
+                    // Too short, keep old
+                }
                 midlet.getDisplay().setCurrent(InstallWizard.this);
                 repaint();
             }
@@ -361,12 +773,13 @@ public class InstallWizard extends Canvas implements CommandListener {
         midlet.getDisplay().setCurrent(tb);
     }
 
-    // ==================== INSTALL THREAD ====================
+    // ==================== INSTALL ====================
 
     private void startInstall() {
-        installing  = true;
-        progress    = 0;
+        installing = true;
+        progress   = 0;
         installLog.removeAllElements();
+
         new Thread(new Runnable() {
             public void run() {
                 runInstall();
@@ -375,67 +788,332 @@ public class InstallWizard extends Canvas implements CommandListener {
     }
 
     private void runInstall() {
-        String[][] steps = {
-            {"2",  "Preparing storage..."},
-            {"5",  "Creating /Terminal/"},
-            {"8",  "Creating /bin/"},
-            {"11", "Creating /boot/"},
-            {"14", "Creating /dev/"},
-            {"17", "Creating /etc/"},
-            {"20", "Creating /home/" + setupUser + "/"},
-            {"24", "Creating /lib/"},
-            {"27", "Creating /mnt/"},
-            {"30", "Creating /opt/"},
-            {"33", "Creating /proc/"},
-            {"36", "Creating /root/"},
-            {"39", "Creating /sbin/"},
-            {"42", "Creating /tmp/"},
-            {"45", "Creating /usr/bin/"},
-            {"48", "Creating /usr/lib/"},
-            {"51", "Creating /usr/local/bin/"},
-            {"54", "Creating /var/log/"},
-            {"57", "Creating /var/cache/"},
-            {"60", "Installing /etc/hostname"},
-            {"63", "Installing /etc/passwd"},
-            {"66", "Installing /etc/motd"},
-            {"69", "Installing /etc/profile"},
-            {"72", "Installing /proc/cpuinfo"},
-            {"75", "Installing /proc/meminfo"},
-            {"78", "Installing /boot/bootlog"},
-            {"81", "Installing ~/.bashrc"},
-            {"84", "Installing ~/readme.txt"},
-            {"87", "Setting up credentials"},
-            {"90", "Writing boot log"},
-            {"93", "Saving filesystem to RMS"},
-            {"96", "Verifying installation"},
-            {"99", "Finalizing..."},
-            {"100","Installation complete!"}
-        };
+        logBoot("INFO", "Install started for user: " + setupUser);
 
-        AppStorage.logBoot("INFO", "Install started for user: " + setupUser);
+        boolean useJSR75 = (selectedStorage > 0 &&
+                            selectedStorage <= storageRoots.length);
+        String jsr75Root = useJSR75 ? storageRoots[selectedStorage - 1] : null;
 
-        for (int i = 0; i < steps.length; i++) {
-            progress  = Integer.parseInt(steps[i][0]);
-            statusMsg = steps[i][1];
-            String logLine = "[" + pad2(progress) + "%] " + steps[i][1];
-            installLog.addElement(logLine);
-            AppStorage.logBoot("INFO", steps[i][1]);
-            repaint();
-            try { Thread.sleep(120); } catch (InterruptedException e) {}
+        // Run appropriate installer
+        if (useJSR75) {
+            runJSR75Install(jsr75Root);
+        } else {
+            runRMSInstall();
         }
 
-        AppStorage.logBoot("INFO", "Install complete. User: " + setupUser);
+        // Save settings
+        logBoot("INFO", "Saving settings...");
         AppStorage.markInstalled();
         AppStorage.saveSetting("default_user", setupUser);
         AppStorage.saveSetting("default_pass", setupPass);
+        AppStorage.saveSetting("storage_type", useJSR75 ? "jsr75" : "rms");
 
-        progress  = 100;
-        step      = 4;
+        if (useJSR75 && jsr75Root != null) {
+            String termPath = jsr75Root + "Terminal/";
+            AppStorage.saveSetting("jsr75_root", jsr75Root);
+            AppStorage.saveSetting("install_path", termPath);
+            JSR75Storage.setInstallRoot(termPath);
+        } else {
+            AppStorage.saveSetting("install_path", "rms://Terminal/");
+        }
+
+        logBoot("INFO", "Install complete. User: " + setupUser);
+
+        progress   = 100;
+        step       = 4;
         installing = false;
+        updateCommands();
         repaint();
     }
 
-    // ==================== PIXEL ART BANNER ====================
+    private void runRMSInstall() {
+        String[][] tasks = {
+            {"2",   "Preparing RMS storage..."},
+            {"5",   "Creating /Terminal/"},
+            {"8",   "Creating /bin/"},
+            {"11",  "Creating /boot/"},
+            {"14",  "Creating /dev/"},
+            {"17",  "Creating /etc/"},
+            {"20",  "Creating /home/" + setupUser + "/"},
+            {"23",  "Creating /home/" + setupUser + "/Documents/"},
+            {"26",  "Creating /home/" + setupUser + "/Downloads/"},
+            {"29",  "Creating /lib/"},
+            {"32",  "Creating /mnt/"},
+            {"35",  "Creating /opt/"},
+            {"38",  "Creating /proc/"},
+            {"41",  "Creating /root/"},
+            {"44",  "Creating /sbin/"},
+            {"47",  "Creating /tmp/"},
+            {"50",  "Creating /usr/bin/"},
+            {"53",  "Creating /usr/lib/"},
+            {"56",  "Creating /usr/local/bin/"},
+            {"59",  "Creating /var/log/"},
+            {"62",  "Creating /var/cache/"},
+            {"65",  "Creating /var/run/"},
+            {"68",  "Installing /etc/hostname"},
+            {"71",  "Installing /etc/passwd"},
+            {"74",  "Installing /etc/motd"},
+            {"77",  "Installing /etc/profile"},
+            {"80",  "Installing /proc/cpuinfo"},
+            {"83",  "Installing /proc/meminfo"},
+            {"86",  "Installing /boot/bootlog"},
+            {"89",  "Installing ~/.bashrc"},
+            {"92",  "Installing ~/readme.txt"},
+            {"95",  "Setting up credentials"},
+            {"97",  "Saving to RMS"},
+            {"99",  "Verifying..."},
+            {"100", "Installation complete!"}
+        };
+
+        for (int i = 0; i < tasks.length; i++) {
+            progress  = Integer.parseInt(tasks[i][0]);
+            statusMsg = tasks[i][1];
+            addLog("[" + pad2(progress) + "%] " + tasks[i][1] + " OK");
+            logBoot("INFO", tasks[i][1]);
+            repaint();
+            pause(80);
+        }
+    }
+
+    private void runJSR75Install(String root) {
+        String base = root + "Terminal/";
+
+        String[] dirs = {
+            "",                                        // Terminal/
+            "bin/",
+            "boot/",
+            "dev/",
+            "etc/",
+            "home/",
+            "home/" + setupUser + "/",
+            "home/" + setupUser + "/Documents/",
+            "home/" + setupUser + "/Downloads/",
+            "home/" + setupUser + "/Pictures/",
+            "home/" + setupUser + "/Music/",
+            "home/" + setupUser + "/Desktop/",
+            "lib/",
+            "mnt/",
+            "opt/",
+            "proc/",
+            "root/",
+            "sbin/",
+            "tmp/",
+            "usr/",
+            "usr/bin/",
+            "usr/lib/",
+            "usr/local/",
+            "usr/local/bin/",
+            "usr/share/",
+            "var/",
+            "var/log/",
+            "var/tmp/",
+            "var/cache/",
+            "var/run/"
+        };
+
+        // File contents to write
+        String[][] files = {
+            {"etc/hostname",   "dashcmd\n"},
+            {"etc/motd",       "Welcome to DashCMD v1.1.1\n" +
+                               "Installed at: " + base + "\n" +
+                               "Type 'help' for commands.\n"},
+            {"etc/passwd",     "root:x:0:0:root:/root:/bin/sh\n" +
+                               setupUser + ":x:1000:1000:" + setupUser +
+                               ":/home/" + setupUser + ":/bin/sh\n"},
+            {"etc/profile",    "# System profile\n" +
+                               "export PATH=/bin:/usr/bin:/sbin\n" +
+                               "export TERM=dashcmd\n"},
+            {"proc/cpuinfo",   "Processor: J2ME Virtual Machine\n" +
+                               "Platform: MIDP 2.0 / CLDC 1.1\n"},
+            {"proc/meminfo",   "Total: " + (Runtime.getRuntime().totalMemory() / 1024) + " KB\n" +
+                               "Free: " + (Runtime.getRuntime().freeMemory() / 1024) + " KB\n"},
+            {"boot/bootlog",   "DashCMD v1.1.1 boot log\n" +
+                               "Storage: JSR-75 FileConnection\n" +
+                               "Path: " + base + "\n"},
+            {"home/" + setupUser + "/.bashrc",
+                               "# User profile for " + setupUser + "\n" +
+                               "export HOME=/home/" + setupUser + "\n" +
+                               "export USER=" + setupUser + "\n" +
+                               "export SHELL=/bin/sh\n"},
+            {"home/" + setupUser + "/readme.txt",
+                               "DashCMD v1.1.1\n" +
+                               "==============\n\n" +
+                               "Terminal emulator for J2ME devices.\n\n" +
+                               "Install location: " + base + "\n" +
+                               "User: " + setupUser + "\n" +
+                               "Home: /home/" + setupUser + "\n\n" +
+                               "Type 'help' for available commands.\n"},
+        };
+
+        int totalWork  = dirs.length + files.length + 3;
+        int workDone   = 0;
+        int okCount    = 0;
+        int failCount  = 0;
+
+        addLog("[INFO] Target: " + formatRoot(root));
+        addLog("[INFO] Path: Terminal/");
+        repaint();
+        pause(100);
+
+        // Create directories
+        for (int i = 0; i < dirs.length; i++) {
+            workDone++;
+            progress  = (workDone * 70) / totalWork;
+            String dirUrl = base + dirs[i];
+            String name   = dirs[i].length() == 0 ? "Terminal/" : dirs[i];
+            statusMsg = "mkdir " + name;
+
+            String err = JSR75Storage.mkdirs(dirUrl);
+            if (err == null) {
+                addLog("[" + pad2(progress) + "%] mkdir " + name + " OK");
+                okCount++;
+            } else {
+                addLog("[" + pad2(progress) + "%] mkdir " + name + " FAIL");
+                failCount++;
+                logBoot("ERROR", "mkdir: " + dirUrl + " -> " + err);
+            }
+            repaint();
+            pause(60);
+        }
+
+        // Write files
+        for (int i = 0; i < files.length; i++) {
+            workDone++;
+            progress  = 70 + ((workDone - dirs.length) * 25) / (files.length + 3);
+            String filePath = files[i][0];
+            String content  = files[i][1];
+            statusMsg = "write " + filePath;
+
+            // Show short name
+            String shortName = filePath;
+            if (shortName.startsWith("home/" + setupUser + "/")) {
+                shortName = "~/" + shortName.substring(
+                    ("home/" + setupUser + "/").length());
+            }
+
+            String err = JSR75Storage.writeFile(base + filePath, content);
+            if (err == null) {
+                addLog("[" + pad2(progress) + "%] " + shortName + " OK");
+                okCount++;
+            } else {
+                addLog("[" + pad2(progress) + "%] " + shortName + " FAIL");
+                failCount++;
+                logBoot("ERROR", "write: " + filePath + " -> " + err);
+            }
+            repaint();
+            pause(60);
+        }
+
+        // Verify
+        progress  = 95;
+        statusMsg = "Verifying installation...";
+        addLog("[95%] Verifying Terminal folder...");
+        repaint();
+        pause(150);
+
+        boolean verified = JSR75Storage.exists(base);
+        boolean etcOk    = JSR75Storage.exists(base + "etc/");
+        boolean homeOk   = JSR75Storage.exists(base + "home/" + setupUser + "/");
+
+        if (verified && etcOk && homeOk) {
+            addLog("[96%] Verification: ALL OK");
+        } else {
+            String detail = "";
+            if (!verified) detail += "root ";
+            if (!etcOk)    detail += "/etc ";
+            if (!homeOk)   detail += "/home ";
+            addLog("[96%] Verification: PARTIAL (" + detail.trim() + " missing)");
+            failCount++;
+        }
+        repaint();
+        pause(100);
+
+        // Summary
+        progress  = 98;
+        statusMsg = "Finalizing...";
+        if (failCount == 0) {
+            addLog("[98%] " + okCount + " items created successfully");
+        } else {
+            addLog("[WARN] " + okCount + " OK, " + failCount + " failed");
+        }
+        repaint();
+        pause(100);
+
+        progress  = 100;
+        statusMsg = "Installation complete!";
+        addLog("[100%] Terminal installed at " + formatRoot(root));
+        logBoot("INFO", "JSR-75: " + okCount + " OK, " + failCount + " FAIL");
+        repaint();
+    }
+
+    // ==================== HELPERS ====================
+
+    private void addLog(String line) {
+        installLog.addElement(line);
+    }
+
+    private void logBoot(String level, String msg) {
+        try {
+            AppStorage.logBoot(level, msg);
+        } catch (Exception e) {}
+    }
+
+    private String formatRoot(String root) {
+        if (root != null && root.startsWith("file:///")) {
+            return root.substring(8);
+        }
+        return root != null ? root : "";
+    }
+
+    private String formatSize(long bytes) {
+        if (bytes < 0)               return "? size";
+        if (bytes < 1024)            return bytes + " B";
+        if (bytes < 1024 * 1024)     return (bytes / 1024) + " KB";
+        if (bytes < 1024L * 1024 * 1024) return (bytes / (1024 * 1024)) + " MB";
+        return (bytes / (1024L * 1024 * 1024)) + " GB";
+    }
+
+    private String getStorageLabel() {
+        if (selectedStorage == 0) {
+            return "RMS (device memory)";
+        } else if (selectedStorage <= storageRoots.length) {
+            return "FC: " + formatRoot(storageRoots[selectedStorage - 1]);
+        }
+        return "RMS";
+    }
+
+    private String getInstallPathPreview() {
+        if (selectedStorage == 0) {
+            return "rms://Terminal/";
+        } else if (selectedStorage <= storageRoots.length) {
+            return storageRoots[selectedStorage - 1] + "Terminal/";
+        }
+        return "rms://Terminal/";
+    }
+
+    private String maskPass(String p) {
+        StringBuffer sb = new StringBuffer();
+        for (int i = 0; i < p.length(); i++) sb.append('*');
+        return sb.toString();
+    }
+
+    private static String pad2(int n) {
+        return n < 10 ? "0" + n : String.valueOf(n);
+    }
+
+    private void animateTo(int target, int delay) {
+        while (progress < target && animRunning) {
+            progress++;
+            repaint();
+            pause(delay);
+        }
+    }
+
+    private void pause(int ms) {
+        try { Thread.sleep(ms); } catch (InterruptedException e) {}
+    }
+
+    // ==================== PIXEL BANNER ====================
 
     private void drawPixelBanner(Graphics g, int ox, int oy, int px, int color) {
         g.setColor(color);
@@ -453,25 +1131,18 @@ public class InstallWizard extends Canvas implements CommandListener {
             int[][] bmp = letters[l];
             for (int row = 0; row < 5; row++) {
                 for (int col = 0; col < 4; col++) {
-                    if (bmp[row][col] == 1)
+                    if (bmp[row][col] == 1) {
                         g.fillRect(lx + col * px, oy + row * px, px, px);
+                    }
                 }
             }
         }
     }
 
-    // ==================== HELPERS ====================
-
-    private String maskPass(String p) {
-        StringBuffer sb = new StringBuffer();
-        for (int i = 0; i < p.length(); i++) sb.append('*');
-        return sb.toString();
-    }
-
-    private static String pad2(int n) { return n < 10 ? "0" + n : String.valueOf(n); }
-
     public void shutdown() {
         animRunning = false;
-        if (animThread != null) animThread.interrupt();
+        if (animThread != null) {
+            animThread.interrupt();
+        }
     }
 }
