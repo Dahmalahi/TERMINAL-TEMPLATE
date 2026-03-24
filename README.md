@@ -2,8 +2,6 @@
 
 **A full-featured terminal emulator for J2ME / MIDP 2.0 devices**
 
-![DashCMD Banner](https://github.com/Dahmalahi/TERMINAL-TEMPLATE/releases/download/V1.1.1/banner.png)
-
 > Classic green-on-black terminal experience with real scripting, persistent storage, and modern Linux-like commands — running on old feature phones and J2ME emulators.
 
 ---
