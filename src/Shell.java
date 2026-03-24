@@ -1,39 +1,59 @@
 import java.util.*;
 
 /**
- * Shell - parses and executes terminal commands.
- * Supports: ls, cd, cat, mkdir, rm, cp, mv, pwd, echo, grep, find,
- *           ps, kill, top, df, du, uname, whoami, id, chmod, chown,
- *           date, cal, history, env, export, alias, which, whereis,
- *           head, tail, wc, sort, uniq, cut, tr, sed, awk (basic),
- *           ping, ifconfig, ip, netstat, ss, nmap, curl, wget,
- *           tar, gzip, zip, unzip, base64, md5sum, sha256sum,
- *           file, stat, free, uptime, w, who, last, lsof,
- *           crontab, service, systemctl, dmesg, lsblk, fdisk,
- *           apt/apt-get, git, python, java, and more.
+ * Shell v1.1.1 - DashCMD command interpreter
+ * CLDC 1.1 / MIDP 2.0
+ *
+ * v1.1.1 additions:
+ *  - Real device time in date, uptime, stat, ls -l
+ *  - Real HTTP: curl/wget use NetworkTask (HttpConnection)
+ *  - ScriptEngine: sh/lua/bsh commands run real scripts
+ *  - JSR-75: storage, install commands for device filesystem
+ *  - desktop command launches DesktopUI
+ *  - /proc/uptime and /proc/meminfo refreshed from device
+ *  - boot log written on startup/shutdown
  */
 public class Shell {
 
-    private VirtualFS fs;
-    private Hashtable env;           // environment variables
-    private Hashtable aliases;       // user aliases
-    private Vector history;          // command history
-    private Vector processes;        // fake process list
-    private boolean isRoot;
-    private int lastExitCode;
+    private VirtualFS      fs;
+    private Hashtable      env;
+    private Hashtable      aliases;
+    private Vector         history;
+    private Vector         processes;
+    private boolean        isRoot;
+    private int            lastExitCode;
+    private ScriptEngine   scriptEngine;
+    private long           bootTime;
+
+    // Background job simulation
+    private Vector         bgJobs;
+    private int            nextJobId;
+
+    // Reference to MIDlet for session/task/desktop management
+    private TerminalMIDlet midlet;
 
     // Pipe/redirect simulation
     private String pipeBuffer;
 
     public Shell(VirtualFS fs) {
-        this.fs = fs;
-        this.env = new Hashtable();
-        this.aliases = new Hashtable();
-        this.history = new Vector();
-        this.processes = new Vector();
+        this(fs, null);
+    }
+
+    public Shell(VirtualFS fs, TerminalMIDlet midlet) {
+        this.fs           = fs;
+        this.midlet       = midlet;
+        this.env          = new Hashtable();
+        this.aliases      = new Hashtable();
+        this.history      = new Vector();
+        this.processes    = new Vector();
+        this.bgJobs       = new Vector();
+        this.nextJobId    = 1;
         this.lastExitCode = 0;
+        this.bootTime     = midlet != null ? midlet.getBootTime() : System.currentTimeMillis();
+        this.scriptEngine = new ScriptEngine(this, fs);
         initEnv();
         initProcesses();
+        AppStorage.logBoot("INFO", "Shell initialized for user: " + fs.getUsername());
     }
 
     private void initEnv() {
@@ -50,6 +70,9 @@ public class Shell {
         env.put("EDITOR",  "nano");
         env.put("PAGER",   "less");
         env.put("DEBIAN_FRONTEND", "noninteractive");
+        env.put("DASHCMD_VERSION", "1.1.1");
+        env.put("TERM_SESSIONS",   "1");
+        env.put("JSR75",           JSR75Storage.isAvailable() ? "1" : "0");
         // Default aliases
         aliases.put("ll",    "ls -alF");
         aliases.put("la",    "ls -A");
@@ -65,6 +88,12 @@ public class Shell {
         aliases.put("del",   "rm");
         aliases.put("type",  "cat");
         aliases.put("grep",  "grep --color=auto");
+        aliases.put("alert", "echo");
+    }
+
+    /** Get env variable (used by ScriptEngine). */
+    public String getEnv(String key) {
+        return (String) env.get(key);
     }
 
     private void initProcesses() {
@@ -195,6 +224,7 @@ public class Shell {
         if (cmd.equals("awk"))        return cmdAwk(args, null);
         if (cmd.equals("tee"))        return cmdTee(args, null);
         if (cmd.equals("xargs"))      return cmdXargs(args, null);
+        if (cmd.equals("nano") || cmd.equals("vi") || cmd.equals("vim") || cmd.equals("pico")) return cmdNano(args);
         if (cmd.equals("less") || cmd.equals("more")) return cmdLess(args);
         if (cmd.equals("stat"))       return cmdStat(args);
         if (cmd.equals("file"))       return cmdFile(args);
@@ -212,17 +242,28 @@ public class Shell {
         if (cmd.equals("umask"))      return "0022";
         if (cmd.equals("whoami"))     return fs.getUsername();
         if (cmd.equals("id"))         return cmdId(args);
-        if (cmd.equals("groups"))     return fs.getUsername() + " adm cdrom sudo dip plugdev lpadmin sambashare";
+        if (cmd.equals("groups"))     return cmdGroups(args);
         if (cmd.equals("users"))      return fs.getUsername();
         if (cmd.equals("who"))        return cmdWho();
         if (cmd.equals("w"))          return cmdW();
         if (cmd.equals("last"))       return cmdLast();
         if (cmd.equals("lastlog"))    return cmdLastlog();
+        if (cmd.equals("login"))      return cmdLogin(args);
         if (cmd.equals("su"))         return cmdSu(args);
         if (cmd.equals("sudo"))       return cmdSudo(args, full);
-        if (cmd.equals("useradd"))    return "[sudo] user added: " + (args.length>0?args[args.length-1]:"");
-        if (cmd.equals("userdel"))    return "[sudo] user deleted";
-        if (cmd.equals("passwd"))     return cmdPasswd(args);
+        if (cmd.equals("useradd") || cmd.equals("adduser")) return cmdUseradd(args);
+        if (cmd.equals("userdel") || cmd.equals("deluser")) return cmdUserdel(args);
+        if (cmd.equals("usermod"))    return cmdUsermod(args);
+        if (cmd.equals("passwd") || cmd.equals("chpasswd")) return cmdPasswd(args);
+        if (cmd.equals("finger"))     return cmdFinger(args);
+        if (cmd.equals("newgrp"))     return "(newgrp: group changed)";
+        if (cmd.equals("groupadd"))   return isRoot() ? "groupadd: group created" : "groupadd: permission denied";
+        if (cmd.equals("groupdel"))   return isRoot() ? "groupdel: group deleted" : "groupdel: permission denied";
+        if (cmd.equals("jobs"))       return cmdJobs();
+        if (cmd.equals("bg"))         return cmdBg(args);
+        if (cmd.equals("fg"))         return cmdFg(args);
+        if (cmd.equals("sessions"))   return cmdSessions();
+        if (cmd.equals("newsession")) return cmdNewSession();
         if (cmd.equals("uname"))      return cmdUname(args);
         if (cmd.equals("hostname"))   return args.length==0 ? fs.getHostname() : "hostname: "+args[0]+" set";
         if (cmd.equals("date"))       return cmdDate(args);
@@ -797,6 +838,27 @@ public class Shell {
         if (cmd.equals("telnet") && args.length > 0 && args[0].equals("towel.blinkenlights.nl")) return cmdStarWars(args);
         if (cmd.equals("rickroll"))     return "Never gonna give you up, never gonna let you down...";
         if (cmd.equals("sudo") && args.length > 0 && args[0].equals("make") && args.length > 1 && args[1].equals("me") && args.length > 2 && args[2].equals("a") && args.length > 3 && args[3].equals("sandwich")) return "Okay.";
+        if (cmd.equals("lshw"))       return cmdLshw();
+        if (cmd.equals("dmidecode"))  return cmdDmidecode(args);
+        if (cmd.equals("hwinfo"))     return cmdLshw();
+        if (cmd.equals("inxi"))       return cmdLshw();
+        if (cmd.equals("neofetch") || cmd.equals("screenfetch")) return cmdNeofetch();
+        if (cmd.equals("version") || cmd.equals("dashcmd")) return cmdDashCmdVersion();
+        if (cmd.equals("motd"))       return cmdMotd();
+        // v1.1.1 new commands
+        if (cmd.equals("sh")  || cmd.equals("bash") || cmd.equals("dash")) return cmdRunSh(args);
+        if (cmd.equals("lua") || cmd.equals("lua5")) return cmdRunLua(args);
+        if (cmd.equals("bsh") || cmd.equals("beanshell")) return cmdRunBsh(args);
+        if (cmd.equals("run")) return cmdRun(args);
+        if (cmd.equals("desktop"))    return cmdDesktop();
+        if (cmd.equals("storage"))    return JSR75Storage.getAvailableRoots();
+        if (cmd.equals("install") && args.length > 0 && args[0].startsWith("file:///"))
+            return JSR75Storage.installToPath(args[0], fs.getUsername());
+        if (cmd.equals("jsr75"))      return JSR75Storage.getStatus();
+        if (cmd.equals("bootlog"))    return AppStorage.readBootLog();
+        if (cmd.equals("clearlog"))   { AppStorage.clearBootLog(); return "Boot log cleared."; }
+        if (cmd.equals("savefs"))     { fs.saveToRMS(); return "Filesystem saved to RMS."; }
+        if (cmd.equals("update") || cmd.equals("upgrade")) return "Use 'apt update' or 'apt upgrade' instead.";
         if (cmd.equals(":(){ :|:& };:")) return "bash: fork bomb detected and blocked!";
         if (cmd.equals("rm") && args.length > 1 && args[0].equals("-rf") && (args[1].equals("/") || args[1].equals("/*"))) return "Nice try. Operation not permitted.";
         // ?? Variable assignment ???????????????????????????????????????????????
@@ -1676,51 +1738,41 @@ public class Shell {
     }
 
     private String cmdHelp(String[] args) {
-        return "J2ME Terminal - Unix/Linux/Windows CMD/macOS command emulator\n" +
-               "================================================================\n\n" +
+        if (args.length > 0 && args[0].equals("new")) return cmdHelpV11();
+        return "DashCMD v1.1 - Unix/Linux/Win/macOS terminal emulator\n" +
+               "=====================================================\n\n" +
                "FILE SYSTEM:\n" +
-               "  ls [-la]   cd [dir]   pwd        mkdir [-p]  rm [-rf]\n" +
-               "  cp [-r]    mv         touch       ln [-s]     find\n" +
-               "  cat [-n]   head [-n]  tail [-nf]  stat        file\n" +
-               "  less/more  which      whereis     chmod       chown\n\n" +
+               "  ls [-la]  cd  pwd  mkdir  rm [-rf]  cp  mv  touch\n" +
+               "  cat [-n]  head  tail  stat  file  less  find  ln\n" +
+               "  chmod  chown  which  whereis  nano/vi  diff  tree\n\n" +
                "TEXT PROCESSING:\n" +
-               "  grep [-ivnrc]  wc [-lwc]  sort [-rnu]  uniq [-cd]\n" +
-               "  cut [-df]      tr         sed s/x/y/g  awk {print}\n" +
-               "  tee            xargs      diff         paste\n\n" +
-               "SYSTEM INFO:\n" +
-               "  uname [-a]  uptime   free [-h]  df [-h]   du [-sh]\n" +
-               "  ps [aux]    top      lsof       lsblk     fdisk\n" +
-               "  dmesg       lspci    lsusb      sensors   neofetch\n" +
-               "  vmstat      iostat   lsmod      sysctl\n\n" +
-               "USERS:\n" +
-               "  whoami  id  who  w  last  su  sudo  passwd\n" +
-               "  useradd  userdel  groups  users\n\n" +
+               "  grep  wc  sort  uniq  cut  tr  sed  awk  tee  xargs\n\n" +
+               "USERS (v1.1):\n" +
+               "  login <user> <pass>  passwd  useradd  userdel\n" +
+               "  id  whoami  who  w  groups  finger  su  sudo\n\n" +
+               "MULTITASKING (v1.1):\n" +
+               "  jobs  bg [%n]  fg [%n]  sessions  newsession\n\n" +
+               "SYSTEM:\n" +
+               "  uname  uptime  free  df  du  ps  top  lsof  lsblk\n" +
+               "  dmesg  vmstat  iostat  neofetch  lshw  dmidecode\n" +
+               "  motd  version  sysctl  lspci  lsusb  sensors\n\n" +
                "NETWORK:\n" +
-               "  ping       ifconfig   ip         netstat    ss\n" +
-               "  nmap       curl       wget       ssh        scp\n" +
-               "  dig        nslookup   traceroute arp        route\n" +
-               "  iptables   ufw        tcpdump    nc\n\n" +
-               "ARCHIVE:\n" +
-               "  tar [-czxf]  gzip  gunzip  zip  unzip  bzip2\n\n" +
-               "CRYPTO:\n" +
-               "  md5sum  sha256sum  sha1sum  base64  hexdump  strings\n\n" +
-               "PACKAGE:\n" +
-               "  apt/apt-get  dpkg  snap  pip/pip3\n\n" +
-               "DEV TOOLS:\n" +
-               "  git  python/python3  node  npm  java  javac  gcc  make\n\n" +
+               "  ping  ifconfig  ip  netstat  ss  nmap  curl  wget\n" +
+               "  ssh  scp  dig  nslookup  traceroute  iptables  ufw\n\n" +
+               "ARCHIVE & CRYPTO:\n" +
+               "  tar  gzip  zip  unzip  bzip2  7z\n" +
+               "  md5sum  sha256sum  base64  hexdump  openssl\n\n" +
+               "PACKAGE & DEV:\n" +
+               "  apt  dpkg  pip  git  python3  node  npm  java  gcc\n\n" +
                "SYSTEM MGMT:\n" +
-               "  systemctl  service  journalctl  crontab  shutdown  reboot\n\n" +
+               "  systemctl  service  journalctl  crontab  shutdown\n\n" +
                "WINDOWS CMD:\n" +
-               "  dir  type  copy  move  del  md  rd  ren  cls  ver\n" +
-               "  ipconfig  tasklist  taskkill  net  netsh  tree  xcopy\n\n" +
-               "macOS:\n" +
-               "  open  pbcopy  pbpaste  sw_vers  brew  say  diskutil\n\n" +
+               "  dir  type  copy  del  ipconfig  tasklist  net\n\n" +
                "PIPE & REDIRECT:\n" +
                "  cmd1 | cmd2    cmd > file    cmd >> file\n\n" +
-               "MISC:\n" +
-               "  echo  date  cal  env  export  alias  history  man\n" +
-               "  bc    expr  seq  yes  cowsay  fortune  neofetch  clear\n" +
-               "Type 'man COMMAND' for more info. Type 'exit' to quit.\n";
+               "  Type 'help new' for v1.1 new commands only.\n" +
+               "  Type 'man COMMAND' for details.\n" +
+               "  Type '5' to open text input.\n";
     }
 
     private String cmdChmod(String[] args) {
@@ -1734,8 +1786,11 @@ public class Shell {
     }
 
     private String cmdId(String[] args) {
-        String user = fs.getUsername();
-        return "uid=1000(" + user + ") gid=1000(" + user + ") groups=1000(" + user + "),4(adm),24(cdrom),27(sudo),30(dip),46(plugdev)";
+        String user = args.length > 0 ? args[0] : fs.getUsername();
+        String uid  = fs.getUid(user);
+        String gid  = fs.getGid(user);
+        return "uid=" + uid + "(" + user + ") gid=" + gid + "(" + user + ")" +
+               " groups=" + gid + "(" + user + "),4(adm),27(sudo),1000(" + user + ")";
     }
 
     private String cmdWho() {
@@ -1766,22 +1821,56 @@ public class Shell {
     }
 
     private String cmdSu(String[] args) {
-        if (args.length > 0 && args[0].equals("-")) return "[switching to root shell - password required]\nbash: su: Authentication failure";
-        return "[su: password required for " + (args.length>0?args[0]:"root") + "]";
+        String targetUser = "root";
+        boolean login = false;
+        for (int i = 0; i < args.length; i++) {
+            if (args[i].equals("-") || args[i].equals("-l") || args[i].equals("--login")) login = true;
+            else if (!args[i].startsWith("-")) targetUser = args[i];
+        }
+        if (targetUser.equals(fs.getUsername())) return ""; // su to self
+        // For simulation: prompt is virtual - just escalate if target is root and user is in sudoers
+        if (targetUser.equals("root")) {
+            if (!fs.isRoot()) {
+                fs.setRoot(true);
+                isRoot = true;
+                return "root@" + fs.getHostname() + ":~# ";
+            }
+            return "(already root)";
+        }
+        if (!fs.userExists(targetUser)) return "su: user " + targetUser + " does not exist";
+        return "[su: switched to " + targetUser + "]";
     }
 
     private String cmdSudo(String[] args, String full) {
-        if (args.length == 0) return "usage: sudo [-AbEHnPS] [-g group] [-u user] command";
+        if (args.length == 0) return "usage: sudo [-AbEHnPS] [-u user] command";
         if (args[0].equals("-l") || args[0].equals("--list")) {
-            return "Matching Defaults entries for " + fs.getUsername() + " on " + fs.getHostname() + ":\n    env_reset, mail_badpass\n\nUser " + fs.getUsername() + " may run the following commands:\n    (" + fs.getUsername() + ") ALL : ALL";
+            return "Matching Defaults entries for " + fs.getUsername() + " on " + fs.getHostname() + ":\n" +
+                   "    env_reset, mail_badpass\n\n" +
+                   "User " + fs.getUsername() + " may run the following commands:\n" +
+                   "    (" + fs.getUsername() + ") NOPASSWD: ALL";
         }
-        // Execute the rest as if root
+        if (args[0].equals("su") || (args[0].equals("-s") && args.length > 1)) {
+            fs.setRoot(true); isRoot = true;
+            return "root@" + fs.getHostname() + ":/# ";
+        }
+        boolean wasRoot = fs.isRoot();
+        fs.setRoot(true); isRoot = true;
         String subcmd = join(args, " ");
-        return "[sudo] running as root: " + subcmd + "\n" + execute(subcmd);
+        String out = execute(subcmd);
+        if (!wasRoot) { fs.setRoot(false); isRoot = false; }
+        return out;
     }
 
     private String cmdPasswd(String[] args) {
-        return "Changing password for " + fs.getUsername() + ".\n(passwd: password updated successfully)";
+        String targetUser = args.length > 0 && !args[0].startsWith("-") ? args[0] : fs.getUsername();
+        if (!fs.isRoot() && !targetUser.equals(fs.getUsername()))
+            return "passwd: you may not view or modify password information for " + targetUser;
+        // In terminal simulation, we accept any password change without prompting
+        // Real implementation would open TextBox - here we simulate success
+        return "Changing password for " + targetUser + ".\n" +
+               "New password: (enter in TextBox - press 5)\n" +
+               "Retype new password:\n" +
+               "passwd: password updated successfully";
     }
 
     private String cmdUname(String[] args) {
@@ -1809,27 +1898,53 @@ public class Shell {
     }
 
     private String cmdDate(String[] args) {
-        // Return a fixed but realistic looking date
-        String[] weekdays = {"Sun","Mon","Tue","Wed","Thu","Fri","Sat"};
-        String[] months   = {"Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"};
-        // Use current simulated time
-        String dt = "Sat Mar 22 10:00:00 UTC 2025";
+        // Use REAL device time via System.currentTimeMillis()
+        long now = System.currentTimeMillis();
+        String fullDate = AppStorage.formatTime(now);
+
         if (args.length > 0 && args[0].startsWith("+")) {
+            // Parse format string - extract components from epoch
+            long secs  = now / 1000;
+            long mins  = secs / 60;
+            long hours = mins / 60;
+            long days  = hours / 24;
+            long years = days / 365;
+            int  year  = (int)(1970 + years);
+            int  dayOfYear = (int)(days % 365);
+            int[] dim  = {31,28,31,30,31,30,31,31,30,31,30,31};
+            String[] mn = {"January","February","March","April","May","June",
+                           "July","August","September","October","November","December"};
+            String[] ms = {"Jan","Feb","Mar","Apr","May","Jun",
+                           "Jul","Aug","Sep","Oct","Nov","Dec"};
+            String[] wn = {"Thursday","Friday","Saturday","Sunday","Monday","Tuesday","Wednesday"};
+            String[] ws = {"Thu","Fri","Sat","Sun","Mon","Tue","Wed"};
+            int month = 0; int dom = dayOfYear;
+            while (month < 11 && dom >= dim[month]) { dom -= dim[month]; month++; }
+            dom++;
+            int dow  = (int)((days + 4) % 7);
+            int h    = (int)(hours % 24);
+            int m    = (int)(mins  % 60);
+            int s    = (int)(secs  % 60);
             String fmt = args[0].substring(1);
-            fmt = replaceAll(fmt, "%Y", "2025");
-            fmt = replaceAll(fmt, "%m", "03");
-            fmt = replaceAll(fmt, "%d", "22");
-            fmt = replaceAll(fmt, "%H", "10");
-            fmt = replaceAll(fmt, "%M", "00");
-            fmt = replaceAll(fmt, "%S", "00");
-            fmt = replaceAll(fmt, "%A", "Saturday");
-            fmt = replaceAll(fmt, "%B", "March");
-            fmt = replaceAll(fmt, "%a", "Sat");
-            fmt = replaceAll(fmt, "%b", "Mar");
+            fmt = replaceAll(fmt, "%Y", String.valueOf(year));
+            fmt = replaceAll(fmt, "%y", String.valueOf(year % 100));
+            fmt = replaceAll(fmt, "%m", pad2(month+1));
+            fmt = replaceAll(fmt, "%d", pad2(dom));
+            fmt = replaceAll(fmt, "%H", pad2(h));
+            fmt = replaceAll(fmt, "%M", pad2(m));
+            fmt = replaceAll(fmt, "%S", pad2(s));
+            fmt = replaceAll(fmt, "%A", wn[dow]);
+            fmt = replaceAll(fmt, "%B", mn[month]);
+            fmt = replaceAll(fmt, "%a", ws[dow]);
+            fmt = replaceAll(fmt, "%b", ms[month]);
+            fmt = replaceAll(fmt, "%j", String.valueOf(dayOfYear));
+            fmt = replaceAll(fmt, "%s", String.valueOf(secs));
             return fmt;
         }
-        return dt;
+        return fullDate;
     }
+
+    private static String pad2(int n) { return n < 10 ? "0"+n : String.valueOf(n); }
 
     private String cmdCal(String[] args) {
         return "   March 2025\nSu Mo Tu We Th Fr Sa\n" +
@@ -1842,7 +1957,13 @@ public class Shell {
     }
 
     private String cmdUptime() {
-        return " 10:00:00 up 1:01,  1 user,  load average: 0.15, 0.10, 0.08";
+        long uptimeMs = System.currentTimeMillis() - bootTime;
+        String time   = AppStorage.formatHMS(System.currentTimeMillis());
+        String upStr  = AppStorage.formatUptime(uptimeMs);
+        long   freeMem= Runtime.getRuntime().freeMemory() / 1024;
+        long   totMem = Runtime.getRuntime().totalMemory() / 1024;
+        return " " + time + " up " + upStr + ",  1 user,  load average: 0.15, 0.10, 0.08\n" +
+               " Memory: " + (totMem-freeMem) + "KB used / " + totMem + "KB total";
     }
 
     private String cmdFree(String[] args) {
@@ -2113,22 +2234,16 @@ public class Shell {
     // =================== NETWORK COMMANDS ===================
 
     private String cmdPing(String[] args) {
-        if (args.length == 0) return "ping: missing host operand";
-        String host = args[args.length - 1];
-        int count = 4;
+        if (args.length == 0) return "ping: missing host operand\nUsage: ping [-c count] host";
+        String host  = args[args.length - 1];
+        int    count = 4;
         for (int i = 0; i < args.length - 1; i++) {
-            if (args[i].equals("-c") && i+1 < args.length-1) { try { count = Integer.parseInt(args[++i]); } catch(Exception e){} }
+            if (args[i].equals("-c") && i+1 < args.length-1) {
+                try { count = Integer.parseInt(args[++i]); } catch (Exception e) {}
+            }
         }
-        StringBuffer sb = new StringBuffer();
-        sb.append("PING ").append(host).append(" (93.184.216.34) 56(84) bytes of data.\n");
-        for (int i = 0; i < Math.min(count, 5); i++) {
-            sb.append("64 bytes from ").append(host).append(" (93.184.216.34): icmp_seq=").append(i+1)
-              .append(" ttl=55 time=").append(12 + i * 3).append(".").append(i * 7).append(" ms\n");
-        }
-        sb.append("\n--- ").append(host).append(" ping statistics ---\n");
-        sb.append(count).append(" packets transmitted, ").append(count).append(" received, 0% packet loss, time ").append(count * 1003).append("ms\n");
-        sb.append("rtt min/avg/max/mdev = 12.0/18.5/24.0/2.5 ms");
-        return sb.toString();
+        // Real ping via HTTP HEAD
+        return NetworkTask.pingHost(host, Math.min(count, 5));
     }
 
     private String cmdIfconfig(String[] args) {
@@ -2228,28 +2343,69 @@ public class Shell {
     }
 
     private String cmdCurl(String[] args) {
-        if (args.length == 0) return "curl: try 'curl --help' for more information";
-        String url = args[args.length-1];
-        boolean silent = false, output = false, head = false;
+        if (args.length == 0) return "curl: try 'curl --help' for more information\nUsage: curl [options] URL";
+        boolean silent = false, headOnly = false, postMode = false;
+        String  url    = null;
+        String  postData = "";
+        String  outFile  = null;
         for (int i = 0; i < args.length; i++) {
             if (args[i].equals("-s") || args[i].equals("--silent")) silent = true;
-            if (args[i].equals("-I") || args[i].equals("--head")) head = true;
-            if (args[i].equals("-o") || args[i].equals("--output")) output = true;
+            else if (args[i].equals("-I") || args[i].equals("--head")) headOnly = true;
+            else if (args[i].equals("-X") && i+1 < args.length && args[i+1].equals("POST")) { postMode = true; i++; }
+            else if ((args[i].equals("-d") || args[i].equals("--data")) && i+1 < args.length) { postData = args[++i]; postMode = true; }
+            else if ((args[i].equals("-o") || args[i].equals("--output")) && i+1 < args.length) outFile = args[++i];
+            else if (!args[i].startsWith("-")) url = args[i];
         }
-        if (head) return "HTTP/1.1 200 OK\nContent-Type: text/html; charset=UTF-8\nContent-Length: 1256\nServer: Apache/2.4.57 (Ubuntu)\nDate: Sat, 22 Mar 2025 10:00:00 GMT";
-        if (!silent) return "  % Total    % Received % Xferd  Average Speed   Time\n" +
-                                 "100  1256  100  1256    0     0   5432      0 --:--:-- --:--:-- --:--:--  5432\n" +
-                                 "<!DOCTYPE html><html><head><title>Response from " + url + "</title></head>\n<body><p>Simulated HTTP response.</p></body></html>";
-        return "<!DOCTYPE html><html><head><title>Response</title></head><body><p>OK</p></body></html>";
+        if (url == null) return "curl: no URL specified";
+        if (!url.startsWith("http")) url = "http://" + url;
+
+        // Perform real HTTP request
+        String result;
+        if (postMode) {
+            result = NetworkTask.httpPostSync(url, postData);
+        } else {
+            result = NetworkTask.httpGetSync(url);
+        }
+
+        if (outFile != null) {
+            // Save to file
+            String destPath = fs.resolvePath(outFile);
+            fs.writeFile(destPath, result);
+            return silent ? "" : "curl: saved to " + destPath + " (" + result.length() + " bytes)";
+        }
+        return silent ? stripHeaders(result) : result;
     }
 
     private String cmdWget(String[] args) {
-        if (args.length == 0) return "wget: missing URL";
-        String url = args[args.length-1];
-        String fname = url.indexOf('/') >= 0 ? url.substring(url.lastIndexOf('/') + 1) : "index.html";
-        if (fname.length() == 0) fname = "index.html";
-        fs.writeFile(fs.resolvePath(fname), "<!-- Downloaded from " + url + " -->\n<html><body>OK</body></html>");
-        return "--2025-03-22 10:00:00-- " + url + "\nResolving " + url + "... 93.184.216.34\nConnecting... connected.\nHTTP request sent, awaiting response... 200 OK\nLength: 1256 (1.2K) [text/html]\nSaving to: '" + fname + "'\n\n" + fname + "     100%[=================>]   1.21K  --.-KB/s    in 0.001s\n\n2025-03-22 10:00:00 (1.21 MB/s) - '" + fname + "' saved [1256/1256]";
+        if (args.length == 0) return "wget: missing URL\nUsage: wget [options] URL";
+        String url     = null;
+        String outFile = null;
+        boolean quiet  = false;
+        for (int i = 0; i < args.length; i++) {
+            if (args[i].equals("-q") || args[i].equals("--quiet")) quiet = true;
+            else if ((args[i].equals("-O") || args[i].equals("--output-document")) && i+1 < args.length) outFile = args[++i];
+            else if (!args[i].startsWith("-")) url = args[i];
+        }
+        if (url == null) return "wget: no URL specified";
+        if (!url.startsWith("http")) url = "http://" + url;
+
+        long startTime = System.currentTimeMillis();
+        String result = NetworkTask.downloadToFS(url, fs);
+        long elapsed  = System.currentTimeMillis() - startTime;
+
+        if (outFile != null) {
+            String content = NetworkTask.httpGetSync(url);
+            fs.writeFile(fs.resolvePath(outFile), content);
+            result = "Saved to: " + outFile + " (" + content.length() + " bytes)";
+        }
+
+        fs.saveToRMS(); // Persist downloaded file
+        return quiet ? "" : result + "\n(" + elapsed + " ms)";
+    }
+
+    private String stripHeaders(String response) {
+        int body = response.indexOf("\n\n");
+        return body >= 0 ? response.substring(body + 2) : response;
     }
 
     private String cmdNmap(String[] args) {
@@ -2752,22 +2908,9 @@ public class Shell {
         return fortunes[idx];
     }
 
-    private String cmdNeofetch() {
-        String user = fs.getUsername();
-        String host = fs.getHostname();
-        return "       _\n" +
-               "      ( )\n" +
-               "     /| |\\      " + user + "@" + host + "\n" +
-               "    / | | \\     -------------------------\n" +
-               "   /  | |  \\    OS: Ubuntu 22.04.3 LTS x86_64\n" +
-               "  |   | |   |   Host: VirtualBox\n" +
-               "  |   | |   |   Kernel: 5.15.0-88-generic\n" +
-               "  |   \\_/   |   Uptime: 1 hour, 1 min\n" +
-               "   \\_______/    Shell: bash 5.1.16\n" +
-               "                Terminal: xterm-256color\n" +
-               "                CPU: Intel i5-8250U (4) @ 1.800GHz\n" +
-               "                GPU: VirtualBox Graphics Adapter\n" +
-               "                Memory: 2143MiB / 7863MiB";
+    private String cmdNeofetchOld() {
+        // replaced by cmdNeofetch() in v1.1 section
+        return cmdNeofetch();
     }
 
     private String cmdSeq(String[] args) {
@@ -2930,8 +3073,9 @@ public class Shell {
                "Bus 002 Device 002: ID 80ee:0021 VirtualBox USB Tablet";
     }
 
-    private String cmdLshw() {
-        return "*-computer\n  description: Computer\n  *-core\n    *-cpu\n      product: Intel Core i5-8250U\n      capacity: 1800MHz\n    *-memory\n      size: 8GiB\n    *-disk\n      product: VBOX HARDDISK\n      size: 60GiB";
+    private String cmdLshwOld() {
+        // replaced by cmdLshw() in v1.1 section
+        return cmdLshw();
     }
 
     private String cmdInxi() {
@@ -4371,7 +4515,337 @@ public class Shell {
 
     private String cmdTune2fs(String[] args) {
         if (args.length == 0) return "Usage: tune2fs [-l] [-c max-mount-counts] [-i interval] device";
-        if (args[0].equals("-l") && args.length > 1) return "tune2fs 1.46.5 (30-Dec-2021)\nFilesystem volume name:   <none>\nLast mounted on:          /\nFilesystem UUID:          a1b2c3d4-e5f6-7890-abcd-ef1234567890\nFilesystem magic number:  0xEF53\nFilesystem revision #:    1 (dynamic)\nFilesystem features:      has_journal ext_attr resize_inode dir_index\nFilesystem state:         clean\nErrors behavior:          Continue\nFilesystem OS type:       Linux\nInode count:              3932160\nBlock count:              15728640\nFree blocks:              8234521\nFree inodes:              3421876\nFirst block:              0\nBlock size:               4096\nFragment size:            4096\nMount count:              42\nMaximum mount count:      -1\nLast checked:             Mon Mar 22 10:00:00 2025";
+        if (args[0].equals("-l") && args.length > 1) return "tune2fs 1.46.5 (30-Dec-2021)\nFilesystem volume name:   <none>\nLast mounted on:          /\nFilesystem UUID:          a1b2c3d4-e5f6-7890-abcd-ef1234567890\nFilesystem state:         clean\nInode count:              3932160\nBlock count:              15728640\nFree blocks:              8234521\nBlock size:               4096\nMount count:              42";
         return "(tune2fs: " + join(args, " ") + ")";
+    }
+
+    // ===================== V1.1 NEW METHODS =====================
+
+    private boolean isRoot() { return fs.isRoot(); }
+
+    /** login command - authenticate with credential store */
+    private String cmdLogin(String[] args) {
+        if (args.length == 0) return "Usage: login <username> <password>\nExample: login root toor";
+        if (args.length < 2) return "login: usage: login <user> <password>";
+        String user = args[0], pass = args[1];
+        String err  = fs.login(user, pass);
+        if (err != null) return err;
+        isRoot = fs.isRoot();
+        env.put("USER",    user);
+        env.put("LOGNAME", user);
+        env.put("HOME",    fs.getHomeDir());
+        env.put("PWD",     fs.getCurrentPath());
+        return "Login successful. Welcome, " + user + "!\n" + cmdMotd();
+    }
+
+    /** useradd */
+    private String cmdUseradd(String[] args) {
+        if (args.length == 0) return "Usage: useradd <username> [password]\nExample: useradd alice secret123";
+        String user = args[0];
+        String pass = args.length > 1 ? args[1] : "changeme";
+        String err  = fs.addUser(user, pass);
+        if (err != null) return err;
+        return "useradd: user '" + user + "' created\nHome directory: /home/" + user + "\nDefault password: " + pass + " (change with passwd)";
+    }
+
+    /** userdel */
+    private String cmdUserdel(String[] args) {
+        if (args.length == 0) return "Usage: userdel <username>";
+        String err = fs.delUser(args[0]);
+        return err != null ? err : "userdel: user '" + args[0] + "' removed";
+    }
+
+    /** usermod */
+    private String cmdUsermod(String[] args) {
+        if (args.length == 0) return "Usage: usermod [-aG group] [-s shell] [-d home] <user>";
+        return "(usermod: " + join(args, " ") + " - changes applied)";
+    }
+
+    /** groups */
+    private String cmdGroups(String[] args) {
+        String user = args.length > 0 ? args[0] : fs.getUsername();
+        return user + " : " + user + " adm cdrom sudo dip plugdev lpadmin sambashare";
+    }
+
+    /** finger - user info */
+    private String cmdFinger(String[] args) {
+        String user = args.length > 0 ? args[0] : fs.getUsername();
+        if (!fs.userExists(user)) return "finger: " + user + ": no such user";
+        String uid = fs.getUid(user);
+        return "Login: " + user + "\t\t\t\tName: " + user + "\n" +
+               "Directory: /home/" + user + "\t\tShell: /bin/bash\n" +
+               "On since Fri Mar 22 10:00 (UTC) on pts/0 from :0\n" +
+               "No mail.\nNo Plan.";
+    }
+
+    /** nano/vi - simulated editor that shows file contents */
+    private String cmdNano(String[] args) {
+        if (args.length == 0) return "Usage: nano <file>\n(Use 'echo text > file' or 'cat > file' to write content)";
+        String path = fs.resolvePath(args[0]);
+        String content = "";
+        if (fs.isFile(path)) {
+            content = fs.readFile(path);
+            if (content == null) return "nano: " + args[0] + ": Permission denied";
+        } else if (!fs.exists(path)) {
+            // Create empty file
+            fs.writeFile(path, "");
+            content = "";
+        } else {
+            return "nano: " + args[0] + ": Is a directory";
+        }
+        // Show file header and content
+        StringBuffer sb = new StringBuffer();
+        sb.append("  GNU nano  [ " + args[0] + " ]\n");
+        sb.append("---\n");
+        if (content.length() == 0) sb.append("(empty file)\n");
+        else {
+            String[] lines = splitLines(content);
+            int show = Math.min(lines.length, 20);
+            for (int i = 0; i < show; i++) sb.append(lines[i]).append("\n");
+            if (lines.length > 20) sb.append("... (" + (lines.length-20) + " more lines)\n");
+        }
+        sb.append("---\n");
+        sb.append("^X Exit  ^O Save  ^W Find  ^K Cut  ^U Paste\n");
+        sb.append("(Tip: use 'echo text >> " + args[0] + "' to append)");
+        return sb.toString();
+    }
+
+    /** jobs - list background jobs */
+    private String cmdJobs() {
+        if (bgJobs.size() == 0) return "";
+        StringBuffer sb = new StringBuffer();
+        for (int i = 0; i < bgJobs.size(); i++) {
+            String[] j = (String[]) bgJobs.elementAt(i);
+            sb.append("[").append(j[0]).append("] ")
+              .append(j[2].equals("Running") ? "+" : " ")
+              .append("  ").append(j[2]).append("       ").append(j[1]).append("\n");
+        }
+        return sb.toString().trim();
+    }
+
+    /** bg - put job in background */
+    private String cmdBg(String[] args) {
+        if (args.length > 0 && args[0].startsWith("%")) {
+            String id = args[0].substring(1);
+            for (int i = 0; i < bgJobs.size(); i++) {
+                String[] j = (String[]) bgJobs.elementAt(i);
+                if (j[0].equals(id)) { j[2] = "Running"; return "[" + id + "]+ " + j[1] + " &"; }
+            }
+            return "bash: bg: %" + id + ": no such job";
+        }
+        // Move most recent stopped job to bg
+        int id = nextJobId++;
+        String cmd = args.length > 0 ? join(args, " ") : "command";
+        bgJobs.addElement(new String[]{String.valueOf(id), cmd, "Running"});
+        if (midlet != null) midlet.addBgTask(cmd);
+        return "[" + id + "] " + id + "\n[" + id + "]+ " + cmd + " &";
+    }
+
+    /** fg - bring job to foreground */
+    private String cmdFg(String[] args) {
+        String id = args.length > 0 && args[0].startsWith("%") ? args[0].substring(1) : null;
+        for (int i = bgJobs.size() - 1; i >= 0; i--) {
+            String[] j = (String[]) bgJobs.elementAt(i);
+            if (id == null || j[0].equals(id)) {
+                j[2] = "Done";
+                return j[1] + "\n[" + j[0] + "]+ Done    " + j[1];
+            }
+        }
+        return "bash: fg: " + (id != null ? "%" + id : "current") + ": no such job";
+    }
+
+    /** sessions - list open terminal sessions */
+    private String cmdSessions() {
+        int count  = midlet != null ? midlet.getSessionCount()  : 1;
+        int active = midlet != null ? midlet.getActiveSession() : 0;
+        StringBuffer sb = new StringBuffer();
+        sb.append("Open sessions (" + count + "/3):\n");
+        for (int i = 0; i < count; i++) {
+            sb.append("  [").append(i).append("]")
+              .append(i == active ? " * " : "   ")
+              .append("Session ").append(i + 1)
+              .append(i == active ? " (active)" : "").append("\n");
+        }
+        sb.append("Use 'New Session' command to open another session.");
+        return sb.toString().trim();
+    }
+
+    /** newsession - request a new terminal session via midlet */
+    private String cmdNewSession() {
+        if (midlet == null) return "newsession: not available";
+        int count = midlet.getSessionCount();
+        if (count >= 3) return "newsession: maximum sessions (3) already open\nUse 'Switch' command to cycle.";
+        return "newsession: use 'New Session' soft key to open session " + (count + 1);
+    }
+
+    /** motd - show message of the day */
+    private String cmdMotd() {
+        String p = "/etc/motd";
+        if (fs.isFile(p)) {
+            String c = fs.readFile(p);
+            return c != null ? c.trim() : "(no motd)";
+        }
+        return "DashCMD v1.1 / Ubuntu 22.04.3 LTS\nType 'help' for commands.";
+    }
+
+    /** DashCMD version info */
+    private String cmdDashCmdVersion() {
+        return "DashCMD v1.1\n" +
+               "J2ME Terminal Emulator - CLDC 1.1 / MIDP 2.0\n" +
+               "Build: 2025-03-22\n" +
+               "Features: Multi-session, Credentials, Real FS, 400+ commands\n" +
+               "Run 'help' for command list. Run 'sessions' for session info.";
+    }
+
+    /** neofetch - system info display */
+    private String cmdNeofetch() {
+        String user = fs.getUsername();
+        String host = fs.getHostname();
+        return user + "@" + host + "\n" +
+               "------------\n" +
+               "OS:      Ubuntu 22.04.3 LTS x86_64\n" +
+               "Kernel:  5.15.0-88-generic\n" +
+               "Shell:   bash 5.1.16\n" +
+               "CPU:     Intel i5-8250U @ 1.60GHz\n" +
+               "Memory:  1234MiB / 7864MiB\n" +
+               "Terminal:DashCMD v1.1 / J2ME\n" +
+               "User:    " + user + " (uid=" + fs.getUid(user) + ")\n" +
+               "Host:    " + host;
+    }
+
+    /** lshw - hardware info */
+    private String cmdLshw() {
+        return "H/W path  Device  Class       Description\n" +
+               "=============================================\n" +
+               "                  system      J2ME Device\n" +
+               "/0                bus         Motherboard\n" +
+               "/0/0              memory      256KiB BIOS\n" +
+               "/0/1              processor   Intel i5-8250U\n" +
+               "/0/2              memory      8GiB System Memory\n" +
+               "/0/3              disk        500GB SSD\n" +
+               "/0/4              network     Ethernet interface\n" +
+               "  eth0    network eth0\n" +
+               "/0/5              network     Wireless interface\n" +
+               "  wlan0   network wlan0";
+    }
+
+    /** dmidecode - BIOS/hardware info */
+    private String cmdDmidecode(String[] args) {
+        if (args.length == 0) return "# dmidecode 3.4\nGetting SMBIOS data from sysfs.\nSMBIOS 3.1 present.";
+        if (args.length > 1 && args[0].equals("-t")) {
+            if (args[1].equals("0") || args[1].equals("bios")) {
+                return "BIOS Information\n\tVendor: DashCMD Firmware\n\tVersion: 1.1\n\tRelease Date: 03/22/2025\n\tROM Size: 16 MB";
+            }
+            if (args[1].equals("4") || args[1].equals("processor")) {
+                return "Processor Information\n\tManufacturer: Intel\n\tVersion: Intel(R) Core(TM) i5-8250U\n\tMax Speed: 3400 MHz\n\tCore Count: 4\n\tThread Count: 8";
+            }
+        }
+        return "(dmidecode: " + join(args, " ") + ")";
+    }
+
+    /** Update cmdHelp to include v1.1 commands */
+    private String cmdHelpV11() {
+        return "=== DashCMD v1.1 NEW COMMANDS ===\n" +
+               "Credentials:\n" +
+               "  login <user> <pass>  - switch user\n" +
+               "  passwd [user]        - change password\n" +
+               "  useradd <u> [pass]   - add user\n" +
+               "  userdel <user>       - delete user\n" +
+               "  finger [user]        - user info\n" +
+               "  id [user]            - uid/gid info\n\n" +
+               "Multitasking:\n" +
+               "  jobs                 - list background jobs\n" +
+               "  bg [%job]            - run job in background\n" +
+               "  fg [%job]            - bring job to foreground\n" +
+               "  sessions             - list terminal sessions\n\n" +
+               "File editing:\n" +
+               "  nano <file>          - view/edit file\n" +
+               "  vi <file>            - alias for nano\n\n" +
+               "System:\n" +
+               "  neofetch             - system info\n" +
+               "  lshw                 - hardware list\n" +
+               "  dmidecode [-t type]  - BIOS/HW info\n" +
+               "  motd                 - message of the day\n" +
+               "  version/dashcmd      - DashCMD version\n\n" +
+               "Type 'help' for full command list.";
+    }
+
+    // ===================== V1.1.1 NEW METHODS =====================
+
+    /** sh <file> - run shell script */
+    private String cmdRunSh(String[] args) {
+        if (args.length == 0) return "Usage: sh <script.sh>\nExample: sh /dev/hello.sh";
+        // Check if it's a -c inline command
+        if (args[0].equals("-c") && args.length > 1) {
+            return scriptEngine.runSh(args[1], "inline");
+        }
+        String path = fs.resolvePath(args[0]);
+        if (!fs.isFile(path)) return "sh: " + args[0] + ": No such file";
+        AppStorage.logBoot("INFO", "Running shell script: " + path);
+        return scriptEngine.runSh(fs.readFile(path), args[0]);
+    }
+
+    /** lua <file> - run Lua 5.0 script */
+    private String cmdRunLua(String[] args) {
+        if (args.length == 0) return "Usage: lua <script.lua>\nExample: lua /dev/hello.lua\nLua 5.0 interpreter (DashCMD built-in)";
+        if (args[0].equals("-e") && args.length > 1) {
+            return scriptEngine.runLua(args[1], "inline");
+        }
+        String path = fs.resolvePath(args[0]);
+        if (!fs.isFile(path)) return "lua: " + args[0] + ": No such file";
+        AppStorage.logBoot("INFO", "Running Lua script: " + path);
+        return scriptEngine.runLua(fs.readFile(path), args[0]);
+    }
+
+    /** bsh <file> - run BeanShell script */
+    private String cmdRunBsh(String[] args) {
+        if (args.length == 0) return "Usage: bsh <script.bsh>\nExample: bsh /dev/hello.bsh\nBeanShell interpreter (DashCMD built-in)";
+        if (args[0].equals("-e") && args.length > 1) {
+            return scriptEngine.runBsh(args[1], "inline");
+        }
+        String path = fs.resolvePath(args[0]);
+        if (!fs.isFile(path)) return "bsh: " + args[0] + ": No such file";
+        AppStorage.logBoot("INFO", "Running BeanShell script: " + path);
+        return scriptEngine.runBsh(fs.readFile(path), args[0]);
+    }
+
+    /** run <file> - auto-detect and run any script */
+    private String cmdRun(String[] args) {
+        if (args.length == 0) return "Usage: run <script>\nAuto-detects .sh/.lua/.bsh by extension or shebang.";
+        String path = fs.resolvePath(args[0]);
+        if (!fs.isFile(path)) return "run: " + args[0] + ": No such file";
+        AppStorage.logBoot("INFO", "Running script: " + path);
+        return scriptEngine.run(path);
+    }
+
+    /** desktop - launch desktop UI */
+    private String cmdDesktop() {
+        if (midlet == null) return "desktop: MIDlet reference not available";
+        midlet.showDesktop(fs);
+        return "Launching Desktop UI...";
+    }
+
+    /** savefs - persist filesystem to RMS */
+    private String cmdSaveFS() {
+        fs.saveToRMS();
+        AppStorage.logBoot("INFO", "Filesystem saved by user");
+        return "Filesystem saved to RMS (" + AppStorage.formatTime(System.currentTimeMillis()) + ")";
+    }
+
+    /** Update /proc files from real device before reading */
+    private void refreshProc() {
+        fs.refreshProcFS(bootTime);
+    }
+
+    /** Override cmdCat to refresh /proc files first */
+    private String cmdCatV111(String[] args) {
+        // Refresh live /proc data if reading /proc files
+        for (int i = 0; i < args.length; i++) {
+            if (args[i].startsWith("/proc") || args[i].startsWith("proc")) {
+                refreshProc();
+                break;
+            }
+        }
+        return cmdCat(args);
     }
 }

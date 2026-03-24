@@ -60,6 +60,10 @@ public class TerminalCanvas extends Canvas {
     private javax.microedition.lcdui.TextBox inputBox;
 
     public TerminalCanvas(TerminalMIDlet midlet) {
+        this(midlet, "user", "1234");
+    }
+
+    public TerminalCanvas(TerminalMIDlet midlet, String user, String pass) {
         this.midlet     = midlet;
         this.screenBuffer = new Vector();
         this.currentInput = "";
@@ -72,9 +76,18 @@ public class TerminalCanvas extends Canvas {
         this.inputMode  = 0;
         this.inputBox   = null;
 
-        // Init filesystem and shell
-        fs    = new VirtualFS("user", "kali");
-        shell = new Shell(fs);
+        // Init filesystem and shell with persisted or fresh data
+        fs    = new VirtualFS(user, "kali");
+        shell = new Shell(fs, midlet);
+
+        // Attempt login with provided credentials
+        String loginErr = fs.login(user, pass);
+        if (loginErr != null) {
+            // Login failed ? use default FS state (already initialized)
+            AppStorage.logBoot("WARN", "Login failed for " + user + ": " + loginErr);
+        } else {
+            AppStorage.logBoot("INFO", "User logged in: " + user);
+        }
 
         // Pick smallest fixed-width font
         font  = Font.getFont(Font.FACE_MONOSPACE, Font.STYLE_PLAIN, Font.SIZE_SMALL);
@@ -83,6 +96,18 @@ public class TerminalCanvas extends Canvas {
 
         // Boot screen
         printBanner();
+
+        // Show motd from real FS
+        String motd = fs.readFile("/etc/motd");
+        if (motd != null && motd.trim().length() > 0) {
+            String[] motdLines = splitStrLines(motd.trim());
+            for (int i = 0; i < motdLines.length; i++) {
+                addLine(motdLines[i], 0x888888);
+            }
+            addLine("", COLOR_FG);
+        }
+
+        addLine(shell.getPrompt(), COLOR_PROMPT);
 
         // Start blink thread
         running = true;
@@ -98,17 +123,19 @@ public class TerminalCanvas extends Canvas {
         blinkThread.start();
     }
 
+    /** Expose VirtualFS for DesktopUI and session switching. */
+    public VirtualFS getFS() { return fs; }
+
     private void printBanner() {
-        // info lines only - art is drawn via Graphics in paint()
         addLine("", COLOR_FG);
-        addLine("DashCMD v1.0", COLOR_PROMPT);
+        addLine("DashCMD v1.1.1", COLOR_PROMPT);
         addLine("J2ME CLDC1.1/MIDP2.0", COLOR_PROMPT);
-        addLine("Kali/Linux/Win/Mac", 0x888888);
+        addLine("RMS+HTTP+JSR75+Lua+BeanShell", 0x888888);
         addLine("", COLOR_FG);
-        addLine("'help' = command list", COLOR_FG);
+        addLine("'help'     = commands", COLOR_FG);
+        addLine("'help new' = v1.1.1 cmds", COLOR_FG);
         addLine("5=input  #=enter", 0x888888);
         addLine("*=backspace", 0x888888);
-        addLine("Up/Dn=history", 0x888888);
         addLine("", COLOR_FG);
     }
 
@@ -268,7 +295,10 @@ public class TerminalCanvas extends Canvas {
         g.fillRect(0, 0, screenW, fontH + 2);
         g.setColor(COLOR_HEADER);
         g.setFont(font);
-        String header = "DashCMD [kali]";
+        String header = "DashCMD v1.1.1 [" + (fs != null ? fs.getUsername() : "user") + "@kali]";
+        if (font.stringWidth(header) > screenW - MARGIN_X * 2) {
+            header = "DashCMD v1.1.1";
+        }
         if (font.stringWidth(header) > screenW - MARGIN_X * 2) {
             header = "DashCMD";
         }
@@ -560,6 +590,21 @@ public class TerminalCanvas extends Canvas {
     // ======================== UTILITIES ========================
 
     private String[] splitLines(String s) {
+        if (s == null || s.length() == 0) return new String[0];
+        Vector v = new Vector();
+        int start = 0;
+        for (int i = 0; i <= s.length(); i++) {
+            if (i == s.length() || s.charAt(i) == '\n') {
+                v.addElement(s.substring(start, i));
+                start = i + 1;
+            }
+        }
+        String[] arr = new String[v.size()];
+        v.copyInto(arr);
+        return arr;
+    }
+
+    private String[] splitStrLines(String s) {
         if (s == null || s.length() == 0) return new String[0];
         Vector v = new Vector();
         int start = 0;
