@@ -72,3 +72,56 @@
 ---
 
 ## 📁 Project Structure
+Terminal/
+├── src/
+│   ├── TerminalMIDlet.java
+│   ├── TerminalCanvas.java
+│   ├── Shell.java
+│   ├── ScriptEngine.java
+│   ├── VirtualFS.java
+│   ├── JSR75Storage.java
+│   ├── InstallWizard.java
+│   ├── DesktopUI.java
+│   ├── AppStorage.java
+│   ├── NetworkTask.java
+│   └── ...
+text---
+
+## 🛠️ Building
+
+Requires **Java ME SDK 3.0** or **WTK 2.5.2**
+
+```bash
+# Clean & Build using WTK
+# Just open the project in Wireless Toolkit and click Build
+
+📜 Changelog
+v1.1.1 (Current)
+
+Added full Install Wizard with JSR-75 detection
+Real device time in all commands
+Persistent RMS filesystem
+Desktop UI (desktop command)
+Multi-session support
+Improved scripting engine
+
+v1.1.0
+
+Initial public release with 300+ commands
+
+
+📄 License
+This project is released under the MIT License.
+Feel free to modify, improve, or port it.
+
+⭐ Credits & Thanks
+
+Built with love for the J2ME community
+Inspired by old Nokia terminals and modern Linux experiences
+Special thanks to everyone still keeping J2ME alive
+
+
+Made for fun and nostalgia.
+Enjoy your retro terminal on modern emulators or real old phones!
+Star the repo if you like it ❤️
+
