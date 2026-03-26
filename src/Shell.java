@@ -30,7 +30,7 @@ public class Shell {
     private int            nextJobId;
 
     // Reference to MIDlet for session/task/desktop management
-    private TerminalMIDlet midlet;
+    private TerminalOS midlet;
 
     // Pipe/redirect simulation
     private String pipeBuffer;
@@ -39,7 +39,7 @@ public class Shell {
         this(fs, null);
     }
 
-    public Shell(VirtualFS fs, TerminalMIDlet midlet) {
+    public Shell(VirtualFS fs, TerminalOS midlet) {
         this.fs           = fs;
         this.midlet       = midlet;
         this.env          = new Hashtable();
@@ -851,29 +851,9 @@ public class Shell {
         if (cmd.equals("bsh") || cmd.equals("beanshell")) return cmdRunBsh(args);
         if (cmd.equals("run")) return cmdRun(args);
         if (cmd.equals("desktop"))    return cmdDesktop();
-                // v1.1.1 new commands - JSR-75
-        if (cmd.equals("storage")) {
-            return JSR75Storage.getRootsInfo();
-        }
-        if (cmd.equals("install")) {
-            if (args.length == 0) {
-                return "Usage: install [root-number]\nRun 'storage' to see available roots.";
-            }
-            try {
-                int idx = Integer.parseInt(args[0]);
-                String[] roots = JSR75Storage.listRoots();
-                if (idx >= 0 && idx < roots.length) {
-                    return JSR75Storage.installToPath(roots[idx], fs.getUsername());
-                } else {
-                    return "Invalid root number.";
-                }
-            } catch (Exception e) {
-                if (args[0].startsWith("file:///")) {
-                    return JSR75Storage.installToPath(args[0], fs.getUsername());
-                }
-                return "Usage: install <number> or file:///path/";
-            }
-        }
+        if (cmd.equals("storage"))    return JSR75Storage.getRootsInfo();
+        if (cmd.equals("install") && args.length > 0 && args[0].startsWith("file:///"))
+            return JSR75Storage.installToPath(args[0], fs.getUsername());
         if (cmd.equals("jsr75"))      return JSR75Storage.getStatus();
         if (cmd.equals("bootlog"))    return AppStorage.readBootLog();
         if (cmd.equals("clearlog"))   { AppStorage.clearBootLog(); return "Boot log cleared."; }
@@ -4841,7 +4821,7 @@ public class Shell {
     /** desktop - launch desktop UI */
     private String cmdDesktop() {
         if (midlet == null) return "desktop: MIDlet reference not available";
-        midlet.showDesktop(fs);
+        midlet.showDesktop();
         return "Launching Desktop UI...";
     }
 

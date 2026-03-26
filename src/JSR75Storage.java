@@ -1,9 +1,11 @@
 import java.util.*;
 import java.io.*;
 import javax.microedition.io.Connector;
+import javax.microedition.io.file.FileConnection;
+import javax.microedition.io.file.FileSystemRegistry;
 
 /**
- * JSR75Storage v1.1.2 - Enhanced auto-detection for DashCMD.
+ * JSR75Storage v1.2.2 - Enhanced auto-detection for DashCMD.
  * CLDC 1.1 / MIDP 2.0 + JSR-75 (optional, detected at runtime).
  */
 public class JSR75Storage {
@@ -39,7 +41,7 @@ public class JSR75Storage {
 
         // Method 1: Use official FileSystemRegistry (best method)
         try {
-            Enumeration roots = javax.microedition.io.file.FileSystemRegistry.listRoots();
+            Enumeration roots = FileSystemRegistry.listRoots();
             while (roots.hasMoreElements()) {
                 String root = (String) roots.nextElement();
                 String url = "file:///" + root;
@@ -133,8 +135,8 @@ public class JSR75Storage {
         try {
             conn = Connector.open(url, Connector.READ);
             if (conn == null) return false;
-            javax.microedition.io.file.FileConnection fc =
-                (javax.microedition.io.file.FileConnection) conn;
+            FileConnection fc =
+                (FileConnection) conn;
             boolean exists = fc.exists() && fc.isDirectory();
             fc.close();
             return exists;
@@ -204,8 +206,8 @@ public class JSR75Storage {
         try {
             conn = Connector.open(url, Connector.READ);
             if (conn == null) return -1;
-            javax.microedition.io.file.FileConnection fc =
-                (javax.microedition.io.file.FileConnection) conn;
+            FileConnection fc =
+                (FileConnection) conn;
             long space = fc.availableSize();
             fc.close();
             return space;
@@ -349,8 +351,8 @@ public class JSR75Storage {
         try {
             conn = Connector.open(url, Connector.READ_WRITE);
             if (conn == null) return "Cannot open: " + url;
-            javax.microedition.io.file.FileConnection fc =
-                (javax.microedition.io.file.FileConnection) conn;
+            FileConnection fc =
+                (FileConnection) conn;
             if (!fc.exists()) {
                 fc.create();
             }
@@ -379,8 +381,8 @@ public class JSR75Storage {
         try {
             conn = Connector.open(url, Connector.READ);
             if (conn == null) return null;
-            javax.microedition.io.file.FileConnection fc =
-                (javax.microedition.io.file.FileConnection) conn;
+            FileConnection fc =
+                (FileConnection) conn;
             if (!fc.exists()) {
                 fc.close();
                 return null;
@@ -415,8 +417,8 @@ public class JSR75Storage {
             
             conn = Connector.open(url, Connector.READ);
             if (conn == null) return new String[0];
-            javax.microedition.io.file.FileConnection fc =
-                (javax.microedition.io.file.FileConnection) conn;
+            FileConnection fc =
+                (FileConnection) conn;
             
             if (!fc.exists() || !fc.isDirectory()) {
                 fc.close();
@@ -454,8 +456,8 @@ public class JSR75Storage {
         try {
             conn = Connector.open(url, Connector.READ_WRITE);
             if (conn == null) return "Cannot open: " + url;
-            javax.microedition.io.file.FileConnection fc =
-                (javax.microedition.io.file.FileConnection) conn;
+            FileConnection fc =
+                (FileConnection) conn;
             if (!fc.exists()) {
                 fc.mkdir();
             }
@@ -503,8 +505,8 @@ public class JSR75Storage {
             javax.microedition.io.Connection conn = null;
             try {
                 conn = Connector.open(current, Connector.READ_WRITE);
-                javax.microedition.io.file.FileConnection fc =
-                    (javax.microedition.io.file.FileConnection) conn;
+                FileConnection fc =
+                    (FileConnection) conn;
                 if (!fc.exists()) {
                     fc.mkdir();
                 }
@@ -528,8 +530,8 @@ public class JSR75Storage {
         try {
             conn = Connector.open(url, Connector.READ_WRITE);
             if (conn == null) return "Cannot open: " + url;
-            javax.microedition.io.file.FileConnection fc =
-                (javax.microedition.io.file.FileConnection) conn;
+            FileConnection fc =
+                (FileConnection) conn;
             if (fc.exists()) {
                 fc.delete();
             }
@@ -552,8 +554,8 @@ public class JSR75Storage {
         try {
             conn = Connector.open(url, Connector.READ);
             if (conn == null) return false;
-            javax.microedition.io.file.FileConnection fc =
-                (javax.microedition.io.file.FileConnection) conn;
+            FileConnection fc =
+                (FileConnection) conn;
             boolean ex = fc.exists();
             fc.close();
             return ex;
@@ -574,8 +576,8 @@ public class JSR75Storage {
         try {
             conn = Connector.open(url, Connector.READ);
             if (conn == null) return false;
-            javax.microedition.io.file.FileConnection fc =
-                (javax.microedition.io.file.FileConnection) conn;
+            FileConnection fc =
+                (FileConnection) conn;
             boolean isDir = fc.exists() && fc.isDirectory();
             fc.close();
             return isDir;
@@ -596,8 +598,8 @@ public class JSR75Storage {
         try {
             conn = Connector.open(url, Connector.READ);
             if (conn == null) return -1;
-            javax.microedition.io.file.FileConnection fc =
-                (javax.microedition.io.file.FileConnection) conn;
+            FileConnection fc =
+                (FileConnection) conn;
             long size = fc.fileSize();
             fc.close();
             return size;

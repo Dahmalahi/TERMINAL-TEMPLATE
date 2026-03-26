@@ -3,7 +3,7 @@ import javax.microedition.rms.*;
 import java.util.*;
 
 /**
- * InstallWizard v1.1.1 - First-run install wizard for DashCMD.
+ * InstallWizard v1.2.2 - First-run install wizard for DashCMD.
  * Auto-detects JSR-75 storage roots with free space display.
  *
  * Sequence:
@@ -15,7 +15,7 @@ import java.util.*;
  */
 public class InstallWizard extends Canvas implements CommandListener {
 
-    private TerminalMIDlet midlet;
+    private TerminalOS midlet;
     private int            step;
     private int            progress;
     private String         statusMsg;
@@ -59,7 +59,7 @@ public class InstallWizard extends Canvas implements CommandListener {
     private Thread animThread;
     private volatile boolean animRunning;
 
-    public InstallWizard(TerminalMIDlet midlet) {
+    public InstallWizard(TerminalOS midlet) {
         this.midlet        = midlet;
         this.step          = 0;
         this.progress      = 0;
@@ -90,7 +90,7 @@ public class InstallWizard extends Canvas implements CommandListener {
     private void startSplash() {
         step        = 0;
         progress    = 0;
-        statusMsg   = "Booting DashCMD v1.1.1...";
+        statusMsg   = "Booting DashCMD v1.2.2...";
         animRunning = true;
 
         animThread = new Thread(new Runnable() {
@@ -134,7 +134,7 @@ public class InstallWizard extends Canvas implements CommandListener {
                 }
                 animateTo(85, 25);
 
-                statusMsg = "Loading DashCMD v1.1.1...";
+                statusMsg = "Loading DashCMD v1.2.2...";
                 logBoot("INFO", statusMsg);
                 animateTo(95, 20);
 
@@ -286,7 +286,7 @@ public class InstallWizard extends Canvas implements CommandListener {
         // Header
         g.setFont(fontM);
         g.setColor(GREEN);
-        g.drawString("DashCMD v1.1.1", 4, y, Graphics.TOP | Graphics.LEFT);
+        g.drawString("DashCMD v1.2.2", 4, y, Graphics.TOP | Graphics.LEFT);
         y += fontM.getHeight() + 2;
 
         g.setFont(fontS);
@@ -547,7 +547,7 @@ public class InstallWizard extends Canvas implements CommandListener {
 
         // Install details
         String[][] info = {
-            {"Version:",  "DashCMD v1.1.1"},
+            {"Version:",  "DashCMD v1.2.2"},
             {"User:",     setupUser},
             {"Home:",     "/home/" + setupUser},
             {"Storage:",  getStorageLabel()},
@@ -914,7 +914,7 @@ public class InstallWizard extends Canvas implements CommandListener {
         // File contents to write
         String[][] files = {
             {"etc/hostname",   "dashcmd\n"},
-            {"etc/motd",       "Welcome to DashCMD v1.1.1\n" +
+            {"etc/motd",       "Welcome to DashCMD v1.2.2\n" +
                                "Installed at: " + base + "\n" +
                                "Type 'help' for commands.\n"},
             {"etc/passwd",     "root:x:0:0:root:/root:/bin/sh\n" +
@@ -927,7 +927,7 @@ public class InstallWizard extends Canvas implements CommandListener {
                                "Platform: MIDP 2.0 / CLDC 1.1\n"},
             {"proc/meminfo",   "Total: " + (Runtime.getRuntime().totalMemory() / 1024) + " KB\n" +
                                "Free: " + (Runtime.getRuntime().freeMemory() / 1024) + " KB\n"},
-            {"boot/bootlog",   "DashCMD v1.1.1 boot log\n" +
+            {"boot/bootlog",   "DashCMD v1.2.2 boot log\n" +
                                "Storage: JSR-75 FileConnection\n" +
                                "Path: " + base + "\n"},
             {"home/" + setupUser + "/.bashrc",
@@ -936,7 +936,7 @@ public class InstallWizard extends Canvas implements CommandListener {
                                "export USER=" + setupUser + "\n" +
                                "export SHELL=/bin/sh\n"},
             {"home/" + setupUser + "/readme.txt",
-                               "DashCMD v1.1.1\n" +
+                               "DashCMD v1.2.2\n" +
                                "==============\n\n" +
                                "Terminal emulator for J2ME devices.\n\n" +
                                "Install location: " + base + "\n" +

@@ -662,6 +662,8 @@ public class VirtualFS {
     public String getHomeDir()     { return homeDir; }
     public String getUsername()    { return username; }
     public String getHostname()    { return hostname; }
+    public void   setUsername(String u) { if (u != null && u.length() > 0) username = u; }
+    public void   setHostname(String h) { if (h != null && h.length() > 0) hostname = h; }
 
     public String getPrompt() {
         String d = currentPath;

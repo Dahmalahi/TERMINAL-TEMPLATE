@@ -2,7 +2,7 @@ import javax.microedition.rms.*;
 import java.util.*;
 
 /**
- * AppStorage v1.1.1 - RMS-backed persistent storage for DashCMD.
+ * AppStorage v1.2.2 - RMS-backed persistent storage for DashCMD.
  * Stores the virtual filesystem, user credentials, settings, and boot logs
  * in J2ME RecordStore so data survives app restarts.
  *

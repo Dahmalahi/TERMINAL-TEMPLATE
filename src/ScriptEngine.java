@@ -35,76 +35,9 @@ public class ScriptEngine {
         this.output     = new StringBuffer();
     }
 
-    // ===================== CLDC 1.1 COMPATIBLE HELPERS =====================
-    
-    /** Replace all occurrences of a substring (CLDC 1.1 compatible) */
-    private static String replaceAll(String source, String find, String replacement) {
-        if (source == null || find == null || find.length() == 0) {
-            return source;
-        }
-        StringBuffer result = new StringBuffer();
-        int start = 0;
-        int idx;
-        while ((idx = source.indexOf(find, start)) >= 0) {
-            result.append(source.substring(start, idx));
-            result.append(replacement);
-            start = idx + find.length();
-        }
-        result.append(source.substring(start));
-        return result.toString();
-    }
-    
-    /** Split string by delimiter (CLDC 1.1 compatible) */
-    private static String[] splitString(String source, String delimiter) {
-        if (source == null || source.length() == 0) {
-            return new String[0];
-        }
-        Vector v = new Vector();
-        int start = 0;
-        int idx;
-        while ((idx = source.indexOf(delimiter, start)) >= 0) {
-            v.addElement(source.substring(start, idx));
-            start = idx + delimiter.length();
-        }
-        v.addElement(source.substring(start));
-        String[] result = new String[v.size()];
-        v.copyInto(result);
-        return result;
-    }
-    
-    /** Check if string contains substring (CLDC 1.1 compatible) */
-    private static boolean containsString(String source, String find) {
-        return source != null && find != null && source.indexOf(find) >= 0;
-    }
-    
-    /** Find last index of substring (CLDC 1.1 compatible) */
-    private static int lastIndexOfString(String source, String find) {
-        if (source == null || find == null) return -1;
-        int lastIdx = -1;
-        int idx = 0;
-        while ((idx = source.indexOf(find, idx)) >= 0) {
-            lastIdx = idx;
-            idx++;
-        }
-        return lastIdx;
-    }
-    
-    /** Check if character is letter or digit (CLDC 1.1 compatible) */
-    private static boolean isLetterOrDigit(char c) {
-        return (c >= 'a' && c <= 'z') || 
-               (c >= 'A' && c <= 'Z') || 
-               (c >= '0' && c <= '9');
-    }
-    
-    /** Copy hashtable (CLDC 1.1 compatible) */
-    private static Hashtable copyHashtable(Hashtable source) {
-        Hashtable copy = new Hashtable();
-        Enumeration keys = source.keys();
-        while (keys.hasMoreElements()) {
-            Object key = keys.nextElement();
-            copy.put(key, source.get(key));
-        }
-        return copy;
+    /** Wire (or replace) the shell reference after construction. */
+    public void setShell(Shell shell) {
+        this.shell = shell;
     }
 
     /** Auto-detect script type and run. */
@@ -292,7 +225,8 @@ public class ScriptEngine {
         // Remove quotes
         cmdLine = unquote(cmdLine);
         if (cmdLine.length() == 0) return "";
-        // Execute via Shell
+        // Execute via Shell (shell may be null if engine was created without one)
+        if (shell == null) return "(sh: no shell context)";
         return shell.execute(cmdLine);
     }
 
@@ -306,12 +240,12 @@ public class ScriptEngine {
         }
         // -z string (empty)
         if (cond.startsWith("-z ")) {
-            String s = replaceAll(cond.substring(3).trim(), "\"", "");
+            String s = stripQuotes(cond.substring(3).trim());
             return s.length() == 0;
         }
         // -n string (non-empty)
         if (cond.startsWith("-n ")) {
-            String s = replaceAll(cond.substring(3).trim(), "\"", "");
+            String s = stripQuotes(cond.substring(3).trim());
             return s.length() > 0;
         }
         // -f file
@@ -325,12 +259,12 @@ public class ScriptEngine {
         // str = str
         if (cond.indexOf(" = ") >= 0) {
             String[] p = split2(cond, " = ");
-            return replaceAll(p[0], "\"", "").equals(replaceAll(p[1], "\"", ""));
+            return stripQuotes(p[0]).equals(stripQuotes(p[1]));
         }
         // str != str
         if (cond.indexOf(" != ") >= 0) {
             String[] p = split2(cond, " != ");
-            return !replaceAll(p[0], "\"", "").equals(replaceAll(p[1], "\"", ""));
+            return !stripQuotes(p[0]).equals(stripQuotes(p[1]));
         }
         // numeric -eq -ne -lt -gt -le -ge
         if (cond.indexOf(" -eq ") >= 0) return numCmp(cond, " -eq ") == 0;
@@ -363,13 +297,13 @@ public class ScriptEngine {
                 int start = i;
                 while (i < s.length()) {
                     char ch = s.charAt(i);
-                    if (braced ? ch == '}' : (!isLetterOrDigit(ch) && ch != '_')) break;
+                    if (braced ? ch == '}' : (!isAlphaNum(ch) && ch != '_')) break;
                     i++;
                 }
                 String name = s.substring(start, i);
                 if (braced && i < s.length()) i++; // skip }
                 String val = (String) vars.get(name);
-                if (val == null) val = shell.getEnv(name);
+                if (val == null && shell != null) val = shell.getEnv(name);
                 if (val == null) val = "";
                 sb.append(val);
             } else {
@@ -493,7 +427,7 @@ public class ScriptEngine {
             // if expr then ... end  (single block)
             if (raw.startsWith("if ") && (raw.endsWith(" then") || raw.indexOf(" then") > 0)) {
                 String cond = raw.substring(3);
-                int thenIdx = lastIndexOfString(cond, " then");
+                int thenIdx = lastIndexOfStr(cond, " then");
                 if (thenIdx > 0) cond = cond.substring(0, thenIdx).trim();
                 // Find end/else
                 int elseIdx = -1, endIdx = -1, depth = 1;
@@ -524,14 +458,14 @@ public class ScriptEngine {
                     String rhs  = rest.substring(eq+1);
                     if (rhs.endsWith(" do")) rhs = rhs.substring(0, rhs.length()-3).trim();
                     String[] parts = splitComma(rhs);
-                    int startVal  = parseInt(evalLua(parts[0].trim(), env), 1);
+                    int start  = parseInt(evalLua(parts[0].trim(), env), 1);
                     int end    = parts.length > 1 ? parseInt(evalLua(parts[1].trim(), env), 10) : 10;
                     int step   = parts.length > 2 ? parseInt(evalLua(parts[2].trim(), env), 1)  : 1;
                     if (step == 0) step = 1;
                     int doneIdx = findLuaEnd(lines, i, to);
                     int bodyEnd = doneIdx >= 0 ? doneIdx : to;
                     int maxIter = 1000;
-                    for (int v = startVal; step > 0 ? v <= end : v >= end; v += step) {
+                    for (int v = start; step > 0 ? v <= end : v >= end; v += step) {
                         if (maxIter-- <= 0) break;
                         env.put(var, String.valueOf(v));
                         executeLua(lines, i, bodyEnd, copyHashtable(env));
@@ -624,7 +558,7 @@ public class ScriptEngine {
 
         // .. concatenation
         if (expr.indexOf(" .. ") >= 0) {
-            String[] parts = splitString(expr, " .. ");
+            String[] parts = splitOn(expr, " .. ");
             StringBuffer sb = new StringBuffer();
             for (int i = 0; i < parts.length; i++) sb.append(evalLua(parts[i].trim(), env));
             return sb.toString();
@@ -874,7 +808,7 @@ public class ScriptEngine {
                 int eq = raw.indexOf(" = ");
                 String varName = raw.substring(0, eq).trim();
                 String val     = raw.substring(eq+3).trim();
-                if (!containsString(varName, "(") && !containsString(varName, ".")) {
+                if (varName.indexOf("(") < 0 && varName.indexOf(".") < 0) {
                     vars.put(varName, evalBsh(val, vars));
                     continue;
                 }
@@ -980,7 +914,7 @@ public class ScriptEngine {
 
         // String concat: "..." + var + "..."
         if (expr.indexOf(" + ") >= 0) {
-            String[] parts = splitString(expr, " + ");
+            String[] parts = splitOn(expr, " + ");
             StringBuffer sb = new StringBuffer();
             for (int k = 0; k < parts.length; k++) sb.append(evalBsh(parts[k].trim(), vars));
             return sb.toString();
@@ -1211,6 +1145,62 @@ public class ScriptEngine {
         if (s == null) return def;
         try { return Integer.parseInt(s.trim()); }
         catch (NumberFormatException e) { return def; }
+    }
+
+    /** Strip leading/trailing double-quotes from a string. CLDC-safe. */
+    private static String stripQuotes(String s) {
+        if (s == null) return "";
+        s = s.trim();
+        if (s.length() >= 2 && s.charAt(0) == '"' && s.charAt(s.length()-1) == '"')
+            return s.substring(1, s.length()-1);
+        if (s.length() >= 2 && s.charAt(0) == '\'' && s.charAt(s.length()-1) == '\'')
+            return s.substring(1, s.length()-1);
+        return s;
+    }
+
+    /** CLDC 1.1 replacement for Character.isLetterOrDigit(). */
+    private static boolean isAlphaNum(char c) {
+        return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+               (c >= '0' && c <= '9');
+    }
+
+    /** CLDC 1.1 replacement for String.lastIndexOf(String). */
+    private static int lastIndexOfStr(String s, String sub) {
+        if (s == null || sub == null || sub.length() == 0) return -1;
+        int last = -1;
+        int idx = 0;
+        while ((idx = s.indexOf(sub, idx)) >= 0) {
+            last = idx;
+            idx += sub.length();
+        }
+        return last;
+    }
+
+    /** CLDC 1.1 replacement for new Hashtable(existing) copy constructor. */
+    private static Hashtable copyHashtable(Hashtable src) {
+        Hashtable dst = new Hashtable();
+        if (src == null) return dst;
+        java.util.Enumeration keys = src.keys();
+        while (keys.hasMoreElements()) {
+            Object k = keys.nextElement();
+            dst.put(k, src.get(k));
+        }
+        return dst;
+    }
+
+    /** Split string on a literal separator string. CLDC-safe (no regex). */
+    private static String[] splitOn(String s, String sep) {
+        if (s == null) return new String[0];
+        Vector v = new Vector();
+        int start = 0, idx;
+        while ((idx = s.indexOf(sep, start)) >= 0) {
+            v.addElement(s.substring(start, idx));
+            start = idx + sep.length();
+        }
+        v.addElement(s.substring(start));
+        String[] a = new String[v.size()];
+        v.copyInto(a);
+        return a;
     }
 
     /** Simple script exception. */

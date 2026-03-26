@@ -3,7 +3,7 @@ import java.io.*;
 import java.util.*;
 
 /**
- * NetworkTask v1.1.1 - Real HTTP networking for DashCMD.
+ * NetworkTask v1.2.2 - Real HTTP networking for DashCMD.
  * Uses J2ME MIDP 2.0 HttpConnection (GCF).
  *
  * All calls are SYNCHRONOUS (blocking) ? call from a background thread.
